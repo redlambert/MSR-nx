@@ -446,17 +446,26 @@ static void present(void) {
         }
         dkCmdBufBarrier(g_cmd, DkBarrier_Fragments, 0);   // before the blits that follow
     }
-    if (g_set.show_fps) {   // pictures the game showed on the top screen in the last half second or so
+    if (g_set.show_fps) {
+        // Pictures the game showed on the top screen, timed from the first picture of the last
+        // second or so to the last one. Counting whole pictures over a fixed half second made a
+        // steady 30 read 28 to 32, depending on where the window edges fell.
+        void msr_top_stamp(unsigned* n, unsigned long long* ns);   // os/hle_hid_gsp.c
         static unsigned long long t0;
         static unsigned s0;
         static int fps10;
-        unsigned long long t = msr_now_ns();
-        if (!t0) { t0 = t; s0 = msr_fb[0].swaps; }
-        if (t - t0 >= 500000000ull) {
-            fps10 = (int)((msr_fb[0].swaps - s0) * 10000000000ull / (t - t0));
+        unsigned s1;
+        unsigned long long t1;
+        msr_top_stamp(&s1, &t1);
+        if (!t0) { t0 = t1; s0 = s1; }
+        if (t1 > t0 && t1 - t0 >= 1000000000ull) {
+            fps10 = (int)((unsigned long long)(s1 - s0) * 10000000000ull / (t1 - t0));
             if (fps10 > 999) fps10 = 999;
-            t0 = t;
-            s0 = msr_fb[0].swaps;
+            t0 = t1;
+            s0 = s1;
+        } else if (msr_now_ns() - t1 > 2000000000ull) {
+            fps10 = 0;   // no picture for 2 s (loading)
+            t0 = 0;
         }
         DkImageView fv;
         dkImageViewDefaults(&fv, &g_fps_img);
@@ -953,7 +962,11 @@ int main(int argc, char** argv) {
         if ((padGetButtons(&g_pad) & (HidNpadButton_Plus | HidNpadButton_Minus | HidNpadButton_L | HidNpadButton_R)) ==
             (HidNpadButton_Plus | HidNpadButton_Minus | HidNpadButton_L | HidNpadButton_R))
             break;   // L + R + plus + minus: quit
-        svcSleepThread(g_set.fps60 ? 4000000 : 16666667);   // at 60 the screens are looked at often enough to show every picture
+        // Look at the screens every 2 ms at both rates. At 30 this slept 16.7 ms on top of the loop's
+        // own work, so a new picture waited anywhere from 0 to about 20 ms before being shown and
+        // landed on an uneven refresh: pictures held for 1, 2 or 3 refreshes (judder). A look with
+        // nothing new returns at once, so this costs almost nothing.
+        svcSleepThread(2000000);
     }
     port_menu_clocks_restore();
     msr_receipt("quit");

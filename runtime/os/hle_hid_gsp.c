@@ -427,6 +427,27 @@ unsigned msr_frame_gaps[3];             // pictures, ones more than 18 ms after 
 unsigned long long msr_frame_worst_ns;  // the longest gap
 unsigned msr_top_swaps(void) { return msr_fb[0].swaps; }
 
+// When the last top screen picture came, with its count, for the fps meter: the meter then measures
+// from picture to picture instead of over a window that cuts pictures in half. A sequence lock: odd
+// while being written.
+static volatile unsigned g_stamp_seq;
+static unsigned long long g_stamp_ns;
+static unsigned g_stamp_n;
+void msr_top_stamp(unsigned* n, unsigned long long* ns) {
+    for (;;) {
+        unsigned s1 = __atomic_load_n(&g_stamp_seq, __ATOMIC_ACQUIRE);
+        if (s1 & 1) continue;
+        unsigned c = __atomic_load_n(&g_stamp_n, __ATOMIC_RELAXED);
+        unsigned long long t = __atomic_load_n(&g_stamp_ns, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&g_stamp_seq, __ATOMIC_RELAXED) == s1) {
+            *n = c;
+            *ns = t;
+            return;
+        }
+    }
+}
+
 static void latch_renderer(const GxJob* j) {
     int screen = (int)j->screen;
     MsrFramebuffer* f = &msr_fb[screen];
@@ -436,7 +457,15 @@ static void latch_renderer(const GxJob* j) {
         msr_log("gsp: screen %d shows %08X (stride %u, format %X)", screen, f->left, f->stride, f->format);
     pica_frame_shown(screen, f->left, f->stride, f->format);
     if (pica_latch_hook) pica_latch_hook(screen);
-    __atomic_add_fetch(&f->swaps, 1, __ATOMIC_RELEASE);
+    unsigned n = __atomic_add_fetch(&f->swaps, 1, __ATOMIC_RELEASE);
+    if (screen == 0) {
+        unsigned long long t = msr_now_ns();
+        __atomic_add_fetch(&g_stamp_seq, 1, __ATOMIC_RELEASE);
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        __atomic_store_n(&g_stamp_n, n, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_stamp_ns, t, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_stamp_seq, 1, __ATOMIC_RELEASE);
+    }
     if (screen == 0) {
         msr_capture_latch();
         fp_frame_end(j->out, j->nout);
@@ -532,7 +561,10 @@ static void gsp_vblank(void) {
 
 int svc_gsp(Ipc* q) {
     static int timer;
-    if (!timer) { timer = 1; sched_add_timer(16715000, gsp_vblank); }   // 59.83 Hz
+    // 60.00 Hz, the Switch screen's rate (the 3DS's is 59.83). At 59.83 the game makes 29.92
+    // pictures a second against a 60 Hz screen, so about every 6 seconds one picture is held for
+    // an extra refresh: a regular hitch. The game's frame limit (33 ms, two vblanks) still holds.
+    if (!timer) { timer = 1; sched_add_timer(16666667, gsp_vblank); }
     switch (q->cmd) {
     case 0x000C:  // TriggerCmdReqQueue
         gx_run_queue();
