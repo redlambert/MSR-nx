@@ -324,6 +324,12 @@ static void present(void) {
     if (!fresh && !redraw) return;
     menu_was_open = g_menu_open;
     last_layout = g_set.layout;
+    // the fps meter counts new top screen pictures put on the Switch's screen here, not the
+    // game's own pictures: when the GPU falls behind, the game can make 32 a second while far
+    // fewer reach the screen (receipt: 162 game pictures and 70 shown in 5 s)
+    static unsigned shown_n;
+    static unsigned long long shown_ns;
+    if (msr_fb[0].swaps != seen[0]) { shown_n++; shown_ns = msr_now_ns(); }
     seen[0] = msr_fb[0].swaps; seen[1] = msr_fb[1].swaps;
     MSR_PERF_BEGIN(PERF_PRESENT);
     // the GPU renderer converts the screens on the GPU from its copy of VRAM; otherwise (or for a
@@ -447,16 +453,14 @@ static void present(void) {
         dkCmdBufBarrier(g_cmd, DkBarrier_Fragments, 0);   // before the blits that follow
     }
     if (g_set.show_fps) {
-        // Pictures the game showed on the top screen, timed from the first picture of the last
+        // New top screen pictures put on the Switch's screen, timed from the first of the last
         // second or so to the last one. Counting whole pictures over a fixed half second made a
         // steady 30 read 28 to 32, depending on where the window edges fell.
-        void msr_top_stamp(unsigned* n, unsigned long long* ns);   // os/hle_hid_gsp.c
         static unsigned long long t0;
         static unsigned s0;
         static int fps10;
-        unsigned s1;
-        unsigned long long t1;
-        msr_top_stamp(&s1, &t1);
+        unsigned s1 = shown_n;
+        unsigned long long t1 = shown_ns;
         if (!t0) { t0 = t1; s0 = s1; }
         if (t1 > t0 && t1 - t0 >= 1000000000ull) {
             fps10 = (int)((unsigned long long)(s1 - s0) * 10000000000ull / (t1 - t0));

@@ -15,7 +15,7 @@ extern volatile u32 msr_frame_limit_ms;   // os/sched.c
 extern volatile int msr_fps60;
 extern volatile int msr_gx_async;   // os/hle_hid_gsp.c
 static void fps_apply(void) {
-    msr_frame_limit_ms = g_set.fps60 ? 15 : 31;   // just under 1 and 2 refreshes: os/sched.c
+    msr_frame_limit_ms = g_set.fps60 ? 16 : 33;
     msr_fps60 = g_set.fps60;
 }
 

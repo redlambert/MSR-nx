@@ -227,15 +227,9 @@ static u64 next_timer(void) {
 // leaves out the paused time.
 volatile int sched_pause_request;
 // The frame rate (port menu): the game's frame limit in ms and whether its fixed 1/30 s interface
-// steps take the measured frame time instead (tools/gen/generate.py PATCHES).
-// The game sleeps until this many ms have passed since its last frame, then waits for the next
-// vblank. With the 3DS's 33 the sleep ends only 0.3 ms before the second vblank (33.3 ms at
-// 60 Hz), and the time the game thread takes to wake after a vblank is often more than that: the
-// frame then waits for the third vblank (50 ms) and the next one is short (receipts: 1 to 5 such
-// frames every 5 s, the fps counter between 29 and 31). 31 (30 fps) and 15 (60 fps) end the
-// sleep well before that vblank, so the vblank wait alone sets the pace: every frame is exactly
-// two refreshes (or one). The game advances by the measured time, so its speed is unchanged.
-volatile u32 msr_frame_limit_ms = 31;
+// steps take the measured frame time instead (tools/gen/generate.py PATCHES). 33 and 0: the 3DS's 30.
+// Not lower: the port does not hold the game to the vblank, so 31 ran it at 32 frames a second.
+volatile u32 msr_frame_limit_ms = 33;
 volatile int msr_fps60;
 volatile int sched_resumed;
 static void pause_point(void) {
