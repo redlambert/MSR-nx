@@ -8,6 +8,10 @@
 #   <game folder>  holds code.bin and exheader.bin (made by extract_3ds.py)
 #   <kit folder>   the unzipped "msr-kit" download from the "Switch runtime kit" workflow
 #
+# Shader pack: put the official release's msr.nro in the game folder as official.nro and its
+# precompiled shaders are copied into this build, so effects do not compile on the Switch the
+# first time they appear. (The renderer and shader tools are unchanged since 0.6.1.)
+#
 # Needs: devkitPro with switch-dev, and Python 3 with capstone (py -3 -m pip install capstone).
 # Game files and everything made from them stay in build/local/ on this PC. Never commit it.
 #
@@ -147,10 +151,60 @@ xargs -a "$B/todo.txt" -P "$JOBS" -I{} sh -c '
 
 # ---- link ------------------------------------------------------------------------------------
 echo "[5/6] Linking msr.nro"
+PACKOBJ=""
+rm -f "$B/shaders.pack"
+if [ -f "$GAME/official.nro" ]; then
+    "$PY" - "$GAME/official.nro" "$B/shaders.pack" <<'PY'
+import struct
+import sys
+
+nro = open(sys.argv[1], 'rb').read()
+found = None
+start = 0
+while True:
+    i = nro.find(b'MSRVSPK1', start)
+    if i < 0:
+        break
+    start = i + 1
+    if i % 256:
+        continue
+    count = struct.unpack_from('<I', nro, i + 8)[0]
+    if not 0 < count < 100000:
+        continue
+    end = 0
+    ok = True
+    last_key = -1
+    for k in range(count):
+        key, pos, size = struct.unpack_from('<QII', nro, i + 16 + 16 * k)
+        if key <= last_key or pos % 256 or size == 0 or i + pos + size > len(nro) or nro[i + pos:i + pos + 4] != b'DKSH':
+            ok = False
+            break
+        last_key = key
+        end = max(end, pos + size)
+    if ok:
+        found = (i, end, count)
+        break
+if not found:
+    print('    no shader pack found in official.nro: building without one')
+    sys.exit(0)
+i, end, count = found
+end = (end + 255) & ~255
+open(sys.argv[2], "wb").write(nro[i:i + end])
+print('    shader pack copied from official.nro: %d shaders' % count)
+PY
+fi
+if [ -f "$B/shaders.pack" ]; then
+    printf '.section .rodata.msr_pack,"a"\n.global msr_pack_data\n.global msr_pack_end\n.balign 256\nmsr_pack_data:\n.incbin "%s"\nmsr_pack_end:\n' "$B/shaders.pack" > "$B/out/pack_blob.S"
+    aarch64-none-elf-gcc $ARCH -c "$B/out/pack_blob.S" -o "$B/out/pack_blob.o"
+    PACKOBJ="$B/out/pack_blob.o"
+else
+    echo "    no shader pack (put the official msr.nro in the game folder as official.nro to add one)"
+fi
 aarch64-none-elf-gcc -specs=$DEVKITPRO/libnx/switch.specs $ARCH -Wl,--gc-sections \
     -o "$B/out/msr.elf" \
     "$KIT"/nxrt/*.o \
     "$B"/nxobj/*.o \
+    $PACKOBJ \
     "$KIT/libuam.a" \
     -L$DEVKITPRO/libnx/lib -ldeko3d -lnx -lm -lstdc++
 nacptool --create "MSR-nx" "FurryLilManChild" "0.6.1-local" "$B/out/msr.nacp"
