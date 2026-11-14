@@ -1868,13 +1868,14 @@ void dkr_compiler_init(const char* cache_dir) {
     }
     mutexInit(&g_jmutex);
     condvarInit(&g_jcond);
-    // Lowest priority on core 2. At 0x2C (the same as the main thread, which presents the
+    // Lowest priority an application may use (0x3B; 0x3F is refused, so the thread never
+    // started and nothing compiled), on core 2. At 0x2C (the same as the main thread, which presents the
     // pictures, and the sound thread, both on core 2) a compile of about a second held that core
     // the whole time: nothing was shown and the game waited on the graphics thread, so every new
     // shader froze the game for as long as its compile took (receipts: frames of 785 ms with
     // compiles of 850 to 900 ms, the GPU idle). Now those threads run whenever they need to and
     // the compile takes the time left over.
-    Result rc = threadCreate(&g_cthread, compile_thread, 0, 0, 4u << 20, 0x3F, 2);
+    Result rc = threadCreate(&g_cthread, compile_thread, 0, 0, 4u << 20, 0x3B, 2);
     if (R_SUCCEEDED(rc)) rc = threadStart(&g_cthread);
     g_compiler_on = R_SUCCEEDED(rc);
     msr_receipt("gpu: %u compiled shaders loaded from %s; compiling on the Switch %s",
