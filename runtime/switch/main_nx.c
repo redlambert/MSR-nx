@@ -726,6 +726,12 @@ static void input_poll(void) {
 int main(int argc, char** argv) {
     (void)argc; (void)argv;
     appletLockExit();
+    // The game's 512 MiB memory window first, before any thread exists: every thread's stack is
+    // placed at a random spot in the same address region, and with the renderer's, the shader
+    // compiler's and the sound thread's stacks already there, a free 512 MiB stretch was sometimes
+    // not left (a run stopped at "could not reserve the 4 GiB guest window" and the next launch
+    // worked). boot.c's own call then finds it reserved.
+    msr_mem_init();
     mkdir(DIR, 0777);
     struct stat st;
     msr_full_log = stat(DIR "/fulllog", &st) == 0;   // create this file to get the detailed msr.log

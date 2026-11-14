@@ -26,6 +26,7 @@ static MsrRegion g_regions[MAX_REGIONS];
 static int g_region_count;
 
 int msr_mem_init(void) {
+    if (g_mem) return 1;   // the Switch build reserves it first thing in main(); boot only checks
 #if defined(__SWITCH__)
     virtmemLock();
     g_mem = (u8*)virtmemFindStack(NX_WINDOW, 0x10000);
