@@ -38,7 +38,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          pip install meson mako
+          pip install meson mako setuptools
           sudo apt-get update -q
           sudo apt-get install -y -q ninja-build bison flex
           mkdir -p "$W/nxout" "$W/nxrt"
