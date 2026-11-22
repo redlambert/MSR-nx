@@ -21,7 +21,7 @@ permissions:
 
 env:
   W: ${{ github.workspace }}/build
-  MSR2DS_COMMIT: 4b4296a
+  MSR2DS_COMMIT: a8f3f96   # msr2ds v2.2.0; its analyze.py is the same as at 4b4296a
 
 jobs:
   kit:
