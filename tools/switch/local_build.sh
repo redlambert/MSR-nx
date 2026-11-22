@@ -109,7 +109,11 @@ print('    game files OK')
 PY
 
 # ---- translate (only when the generator or the CPU headers changed) --------------------------
-STAMP=$(cat tools/gen/*.py runtime/cpu/*.h runtime/os/*.h "$KIT/analyze.py" | sha256sum | cut -c1-16)
+# extra_entries.txt in the game folder (optional): functions the receipt said ran on the interpreter,
+# one "0xADDRESS" per line (odd = Thumb), translated like the rest from the next build on
+EXTRA=""
+if [ -f "$GAME/extra_entries.txt" ]; then EXTRA="$GAME/extra_entries.txt"; fi
+STAMP=$(cat tools/gen/*.py runtime/cpu/*.h runtime/os/*.h "$KIT/analyze.py" $EXTRA | sha256sum | cut -c1-16)
 if [ -f "$B/gen/table.c" ] && [ "$(cat "$B/stamp" 2>/dev/null)" = "$STAMP" ]; then
     echo "[3/6] Game code already translated: skipping"
 else
@@ -117,7 +121,7 @@ else
     rm -rf "$B/gen" "$B/nxobj"
     mkdir -p "$B/gen" "$B/nxobj"
     "$PY" "$KIT/analyze.py" "$B/extract" > "$B/analyze.log" || fail "analyze.py failed (see $B/analyze.log)"
-    "$PY" tools/gen/generate.py "$B/extract" "$B/extract/functions.csv" "$B/gen" || fail "generate.py failed"
+    "$PY" tools/gen/generate.py "$B/extract" "$B/extract/functions.csv" "$B/gen" $EXTRA || fail "generate.py failed"
     echo "$STAMP" > "$B/stamp"
 fi
 
@@ -207,7 +211,7 @@ aarch64-none-elf-gcc -specs=$DEVKITPRO/libnx/switch.specs $ARCH -Wl,--gc-section
     $PACKOBJ \
     "$KIT/libuam.a" \
     -L$DEVKITPRO/libnx/lib -ldeko3d -lnx -lm -lstdc++
-nacptool --create "MSR-nx" "FurryLilManChild" "0.6.1-local" "$B/out/msr.nacp"
+nacptool --create "MSR-nx" "FurryLilManChild" "0.7.0-local" "$B/out/msr.nacp"
 elf2nro "$B/out/msr.elf" "$B/out/msr.nro" --nacp="$B/out/msr.nacp" --icon=runtime/switch/res/icon.jpg > /dev/null
 
 echo "[6/6] Done"

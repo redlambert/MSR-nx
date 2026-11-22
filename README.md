@@ -85,6 +85,10 @@ Up/down picks a row, left/right changes it, A confirms, B or minus closes. Setti
 | CPU clock | Stock (1020 MHz) or boost (1785 MHz) |
 | GPU clock | System default, 460, 614 or 768 MHz |
 | Frame counter | On or off |
+| Show newest frame | On (the default): the GPU never runs more than about one picture ahead, so the newest picture reaches the screen when the GPU is the limit (60 fps at 2x). Off for comparing |
+| Gallery unlocks | The amiibo extras (Metroid II art, concept art, the sound test) in Options > Gallery |
+| Every difficulty | Normal, Hard and Fusion offered for every file's New Game, a new file's too |
+| Fusion suit | Samus in the Fusion suit at any difficulty (damage stays the difficulty's). Her model changes at the next save load or area load; the HUD changes at once |
 | GPU sync, Copies | Renderer options for testing; leave them at Fewer waits and From images |
 | Button mapping | Any Switch button for each 3DS button and for Next beam |
 
@@ -103,6 +107,8 @@ The game's code is generated from your own `code.bin`, so there is nothing to bu
 
 ## Credits and license
 
-MSR-nx is MIT licensed (see [LICENSE](LICENSE)); third-party parts are listed in [NOTICE.md](NOTICE.md).
+MSR-nx is licensed under the GPL, version 3 or later (see [LICENSE](LICENSE)), since 0.7.0 includes msr2ds's fallback
+interpreter (GPL-2.0-or-later). The code written for MSR-nx before that is also available under its original MIT
+license ([LICENSE-MIT](LICENSE-MIT)). Third-party parts are listed in [NOTICE.md](NOTICE.md).
 Metroid and Samus Returns are trademarks of Nintendo. This project is not affiliated with Nintendo and contains no
 game data.

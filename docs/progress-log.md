@@ -1,5 +1,38 @@
 # Progress log (newest first)
 
+## 2026-11-22: 0.7.0 test, things borrowed from msr2ds 2.2.0
+
+- msr2ds since 2.0 is a static recompilation too (its own recompiler, Vulkan/OpenGL on SDL); its runtime is not ours,
+  its findings about the game are. Read at v2.2.0 (a8f3f96); the kit's analyze.py pin moved there (the file is the
+  same as at 4b4296a). All 30 of its instruction patch words checked against our code.bin: all match.
+- Baseline (Alec's receipt, 0.6.2, handheld, GPU 614, 2x, single screen): 30 fps steady (30.1 to 30.4 per 5 s).
+  60 fps at 2x: 32 to 43 game pictures a second, GPU busy about 98%, but only 65 to 89 presents per 5 s (13 to 17
+  a second on screen): present() submits behind all queued game work and waits for its fence, and the game's GX
+  commands ran several pictures ahead. Hitches of 380 to 480 ms about every 90 s at 30 and 60 (GPU work dips with
+  them: area loading, not shaders; no compile waits all run).
+- Fallback interpreter: msr2ds native/runtime/interp_full.c copied as runtime/cpu/interp_arm.c (GPL, repo now
+  GPL-3.0-or-later; Alec chose that over writing our own). cpu/dispatch.c runs it for calls to unknown targets
+  (until the return address), for top-level pcs that are not entries, and for msr_unknown sites (except "fell off the
+  end", whose instruction already ran), calling translated functions natively along the way. Each start address is
+  written to the receipt once with its extra_entries.txt line; local_build.sh passes the game folder's
+  extra_entries.txt to the generator.
+- Differential test on a PC (not committed: it needs the generated code): sampled game functions run translated,
+  fully interpreted, and mixed (interpreter with native calls, as the port runs it), from the same random registers
+  and memory; registers, flags, VFP and all memory compared (tools/tests/interp_diff_test.c). 8000 sampled, 2752
+  ran cleanly natively: 2747 the same fully interpreted, 2748 the same mixed. The rest: interpreter runs past the
+  time limit, a jump into data from random input, and one function whose flags differ after its return (the
+  translation's switch8 stand-in leaves the flags the helper would set; dead after a call).
+- Extras (msr2ds cheats.h, patches.cpp): generate.py GATED compiles each patched instruction as
+  `if (msr_extras & bit) replacement else original`, ENTRY_HOOKS calls a port function on entry to four game
+  functions (file select state change, text copy, music fade, heap set-up); check_versions stops the build if a word
+  or a call does not match. Port menu rows: Gallery unlocks, Every difficulty, Fusion suit. The linear memory word
+  (0x704B18) is raised 8 MB at boot and the package heap set-up hook widens the package heap by 8 MB.
+- Show newest frame (port menu, on by default): dk_latch waits, at each top-screen latch, for the fence of the
+  previous top-screen latch, so the GPU queue holds at most about one picture ahead of present(). Receipt line
+  "screen:" counts pictures put on the Switch's screen and the waits.
+- Not taken (asked about or deferred): the infinite energy, missiles and Aeion cheats (they call game functions from
+  outside the game loop and scan the heap), the HUD built from the game's own state, widescreen.
+
 ## 2026-11-12: issue 1, second crash (flying bug touching Samus)
 
 - JAGSTAX's run008 and run009 (0.6.1): "fatal: call to 001892E0, not a known function (from lr

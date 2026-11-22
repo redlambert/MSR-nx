@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.6.2 test (issue 1, second crash)"
+#define MSR_VERSION "0.7.0 test (interpreter, extras, show newest frame)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -313,6 +313,7 @@ static int g_out_shot;
 static char g_out_shot_tag[48];
 static char g_run_dir[128];
 static DkMemBlock g_out_mem;   // top-screen pictures shown from the scaler's picture, and not
+static unsigned g_shown_total;   // new top-screen pictures put on the Switch's screen (the speed report)
 static void present(void) {
     if (g_gpu_render) dkr_frame_end();
     // only convert the screens when the game showed a new picture on one of them; the menu (open,
@@ -329,7 +330,7 @@ static void present(void) {
     // fewer reach the screen (receipt: 162 game pictures and 70 shown in 5 s)
     static unsigned shown_n;
     static unsigned long long shown_ns;
-    if (msr_fb[0].swaps != seen[0]) { shown_n++; shown_ns = msr_now_ns(); }
+    if (msr_fb[0].swaps != seen[0]) { shown_n++; shown_ns = msr_now_ns(); g_shown_total++; }
     seen[0] = msr_fb[0].swaps; seen[1] = msr_fb[1].swaps;
     MSR_PERF_BEGIN(PERF_PRESENT);
     // the GPU renderer converts the screens on the GPU from its copy of VRAM; otherwise (or for a
@@ -882,6 +883,20 @@ int main(int argc, char** argv) {
                 unsigned gd, gv, go;
                 dkr_gpu_times(&gd, &gv, &go);
                 msr_receipt("  GPU time: draws %u ms, VRAM work %u ms, elsewhere or idle %u ms", gd, gv, go);
+                {
+                    void dkr_latch_stats(unsigned* waits, unsigned* ms);
+                    unsigned lw, lm;
+                    dkr_latch_stats(&lw, &lm);
+                    static unsigned shown_last;
+                    msr_receipt("  screen: %u new top-screen pictures shown; show newest frame %s, %u waits (%u ms)",
+                                g_shown_total - shown_last, g_set.newest ? "on" : "off", lw, lm);
+                    shown_last = g_shown_total;
+                    unsigned long long msr_interp_steps(void);
+                    static unsigned long long steps_last;
+                    unsigned long long st = msr_interp_steps();
+                    if (st != steps_last) msr_receipt("  interpreter: %llu instructions run", st - steps_last);
+                    steps_last = st;
+                }
                 extern unsigned eye_runs[2], eye_total[2];
                 static unsigned er0, er1, et0, et1;
                 msr_receipt("  eyes: left %u draws run of %u, right %u run of %u (the frame plan skips the rest)", eye_runs[0] - er0, eye_total[0] - et0,

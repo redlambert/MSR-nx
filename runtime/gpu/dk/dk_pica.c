@@ -1446,7 +1446,35 @@ static int dk_gx(int op, const u32* d) {
 
 // A picture was latched for display: everything queued so far goes to the GPU, so the screen output
 // (on the main thread, the same queue) sees it.
-static void dk_latch(int screen) { (void)screen; flush(0); }
+// Frame queue limit (port menu "Show newest frame"): at a top-screen picture, wait until the GPU
+// has finished the picture before it. The GPU then never has more than about one picture queued
+// ahead, so the screen output (behind them in the same queue) waits for at most that one. Without
+// it the game's commands ran several pictures ahead when the GPU was the limit (60 fps at 2x,
+// 0.6.2 baseline receipt: about 36 pictures a second made, 13 to 17 reaching the screen).
+int dkr_frame_limit = 1;
+static DkFence g_latch_fence;
+static int g_latch_fence_set;
+static unsigned long long g_latch_wait_ns;
+static unsigned g_latch_waits;
+static void dk_latch(int screen) {
+    flush(0);
+    if (screen != 0) return;
+    if (dkr_frame_limit && g_latch_fence_set) {
+        unsigned long long t0 = msr_now_ns();
+        dkFenceWait(&g_latch_fence, -1);
+        unsigned long long dt = msr_now_ns() - t0;
+        if (dt > 200000ull) { g_latch_waits++; g_latch_wait_ns += dt; }
+    }
+    g_latch_fence = g_last_fence;
+    g_latch_fence_set = 1;
+}
+// for the speed report: waits over 0.2 ms at a picture and their time since the last call
+void dkr_latch_stats(unsigned* waits, unsigned* ms) {
+    *waits = g_latch_waits;
+    *ms = (unsigned)(g_latch_wait_ns / 1000000ull);
+    g_latch_waits = 0;
+    g_latch_wait_ns = 0;
+}
 
 // The screens, converted on the GPU from its VRAM into out (top 400x240 then bottom 320x240, RGBA8,
 // rows bottom to top as the swapchain wants). Recorded into the caller's command buffer; returns

@@ -168,9 +168,86 @@ PATCHES = {
 # what each patched instruction must be, so a different game version is not patched blindly
 PATCH_EXPECT = {0x156484: 'cmp', 0x15648C: 'rsb', 0x49DFF8: 'vldr', 0x4E3BA4: 'vldr', 0x10C6B4: 'vldrne'}
 
+# Instructions that follow a port menu switch: with the bit of msr_extras (runtime/os/extras.h) set,
+# the replacement runs; without it, the game's own instruction. Each entry: the bit, the game's word
+# (checked, so another game version stops the build), and the replacement's C (a 'b <addr>' entry is
+# a branch, emitted as the translator emits one).
+# Addresses and the facts behind them: gminustwo/msr2ds src/msr/cheats.h (read as reference).
+MOV_R0_1 = ['r0 = 1u;']
+MOV_R1_1 = ['r1 = 1u;']
+STRB_R0_R3 = ['wr8(r3, r0);']   # the flag a replaced settings read (bl 0x1EDC10) would have stored
+GALLERIES, DIFFICULTY, FUSION = 'MSR_EXTRA_GALLERIES', 'MSR_EXTRA_DIFFICULTY', 'MSR_EXTRA_FUSION'
+GATED = {
+    # The amiibo unlocks a save's profile summary reads (0x3F8xxx): ldr r0, [sp, #0x88]; bl 0x1EDC10
+    # for FusionMode, then GalleryMetroidIIUnlocked, GalleryConceptArtUnlocked, GalleryMusicUnlocked.
+    0x3F8D40: (DIFFICULTY, 0xE59D0088, MOV_R0_1),
+    0x3F8D44: (DIFFICULTY, 0xEBF7D3B1, STRB_R0_R3),
+    0x3F8E10: (GALLERIES, 0xE59D0088, MOV_R0_1),
+    0x3F8E14: (GALLERIES, 0xEBF7D37D, STRB_R0_R3),
+    0x3F8E38: (GALLERIES, 0xE59D0088, MOV_R0_1),
+    0x3F8E3C: (GALLERIES, 0xEBF7D373, STRB_R0_R3),
+    0x3F8E60: (GALLERIES, 0xE59D0088, MOV_R0_1),
+    0x3F8E64: (GALLERIES, 0xEBF7D369, STRB_R0_R3),
+    # the menus' checks of the save's Fusion Mode flag (+0x6C of the slot's summary)
+    0x4D828C: (DIFFICULTY, 0xE5D0006C, MOV_R0_1),
+    0x4DD3F4: (DIFFICULTY, 0xE5D0006C, MOV_R0_1),
+    0x4E2134: (DIFFICULTY, 0xE5D1106C, MOV_R1_1),
+    # New Game goes to the difficulty list as if the game were beaten (+0x68)
+    0x4E3430: (DIFFICULTY, 0xE5D00068, MOV_R0_1),
+    # a new file's Play: push {r4-r8, lr} -> b 0x4E33E0, the handler that opens the list
+    # (runtime/os/extras.c adapts the list to an empty slot)
+    0x4E30C8: (DIFFICULTY, 0xE92D41F0, 'b 0x4E33E0'),
+    # the galleries' own screens: str r4, [sp] (the default); bl 0x1EDC10
+    0x492504: (GALLERIES, 0xE58D4000, MOV_R0_1),
+    0x492508: (GALLERIES, 0xEBF56DC0, STRB_R0_R3),
+    0x495BC8: (GALLERIES, 0xE58D4000, MOV_R0_1),
+    0x495BCC: (GALLERIES, 0xEBF5600F, STRB_R0_R3),
+    0x495D54: (GALLERIES, 0xE58D4000, MOV_R0_1),
+    0x495D58: (GALLERIES, 0xEBF55FAC, STRB_R0_R3),
+    # the game object's Fusion flag (+0x1859) where it picks Samus's packages, her models, the scripts'
+    # LoadModelByFusion and the interface's suit sprites; left alone: the damage multiplier (0x384CBC)
+    # and the save's difficulty (0x130454, 0x263460)
+    0x10D438: (FUSION, 0xE5D01059, MOV_R1_1),
+    0x2707A0: (FUSION, 0xE5D01059, MOV_R1_1),
+    0x143EF8: (FUSION, 0xE7D00006, MOV_R0_1),
+    0x404080: (FUSION, 0xE5D01059, MOV_R1_1),
+    0x3A83D4: (FUSION, 0xE5D00059, MOV_R0_1),
+    0x250448: (FUSION, 0xE5D00059, MOV_R0_1),
+    0x453468: (FUSION, 0xE5D00059, MOV_R0_1),
+    0x473544: (FUSION, 0xE5D00059, MOV_R0_1),
+}
+
+# Game functions that call a port function on entry (runtime/os/extras.c), with the calls into them
+# that the hooks recognise by their return address: checked, as GATED's words are.
+ENTRY_HOOKS = {
+    0x4E40A0: ('msr_hook_state_change', [0x4E3470, 0x4DD4D4]),
+    0x1913C0: ('msr_hook_text_copy', [0x4DF380, 0x4DDDF0, 0x4DF2DC]),
+    0x4C1570: ('msr_hook_music_fade', [0x4E36FC, 0x4E3554, 0x4E3898]),
+    0x51BB14: ('msr_hook_heap_setup', [0x51BC14, 0x51BC34]),
+}
+
+
+def check_versions(prog):
+    """Stops the build when the game's code is not the version GATED and ENTRY_HOOKS were made for."""
+    for a, (_, word, _) in GATED.items():
+        if prog.word(a) != word:
+            raise SystemExit('extras: the word at %08X is %08X, expected %08X: another game version?' % (a, prog.word(a), word))
+    for fn, (_, rets) in ENTRY_HOOKS.items():
+        if fn not in prog.functions:
+            raise SystemExit('extras: %08X is not a function entry: another game version?' % fn)
+        for r in rets:
+            bl = prog.word(r - 4)
+            off = ((bl & 0xFFFFFF) ^ 0x800000) - 0x800000
+            if bl >> 24 != 0xEB or r + 4 + off * 4 != fn:
+                raise SystemExit('extras: no call to %08X returning to %08X: another game version?' % (fn, r))
+
 
 def gen_function(prog, fn, stats, problems):
     out = ['void %s(Cpu* __restrict c) {' % fname(fn.addr)]
+    if fn.addr in ENTRY_HOOKS:
+        # the registers are in Cpu at a function's entry; the hook may change them before they load
+        out.append('  { extern void %s(Cpu* c); %s(c); }' % (ENTRY_HOOKS[fn.addr][0], ENTRY_HOOKS[fn.addr][0]))
+        stats['entry_hooks'] += 1
     out += ['  ' + l for l in regs.declare_in()]
     hooks = FnHooks(prog, fn, stats)
     addrs = sorted(fn.insns)
@@ -198,7 +275,20 @@ def gen_function(prog, fn, stats, problems):
             e = emit.Emit(ins, hooks)
             hooks.unknown(e, 'untranslated %s' % ins.mnem)
             body = ['{'] + ['  ' + l for l in e.out] + ['}']
-        out += ['  ' + l for l in body]
+        if a in GATED:
+            bit, word, repl = GATED[a]
+            if isinstance(repl, str):   # a branch
+                e = emit.Emit(ins, hooks)
+                hooks.branch(e, int(repl.split()[1], 16))
+                repl = e.out
+            out.append('  if (msr_extras & %s) {' % bit)
+            out += ['    ' + l for l in repl]
+            out.append('  } else {')
+            out += ['    ' + l for l in body]
+            out.append('  }')
+            stats['gated'] += 1
+        else:
+            out += ['  ' + l for l in body]
         nxt = a + ins.size
         following = addrs[k + 1] if k + 1 < len(addrs) else None
         if following != nxt and can_fall_through(ins):
@@ -236,12 +326,13 @@ def main():
     extract, functions_csv, out_dir = sys.argv[1:4]
     extra = sys.argv[4] if len(sys.argv) > 4 else None
     prog = decode.load(extract, functions_csv, extra).run()
+    check_versions(prog)
     os.makedirs(out_dir, exist_ok=True)
     stats = collections.Counter()
     problems = collections.Counter()
     header = ['#include "msr_cpu.h"', '#define DECL(a) void a(Cpu* __restrict c);']
     decls = ['void %s(Cpu* __restrict c);' % fname(a) for a in sorted(prog.functions)]
-    open(os.path.join(out_dir, 'functions.h'), 'w').write('#pragma once\n#include "msr_cpu.h"\n' + '\n'.join(decls) + '\n')
+    open(os.path.join(out_dir, 'functions.h'), 'w').write('#pragma once\n#include "msr_cpu.h"\n#include "extras.h"\n' + '\n'.join(decls) + '\n')
     unit, size, n_units = [], 0, 0
 
     def flush():
