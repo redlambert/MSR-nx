@@ -35,8 +35,9 @@ Session-by-session notes: [docs/progress-log.md](docs/progress-log.md).
   (GPU 307 MHz) to 48 (GPU 460 MHz): the GPU is the limit there. 2x at 60 is too much for the GPU.
 - At 60 the game runs with patches to its frame timing. If anything moves at the wrong speed at 60 and not at 30,
   please report it.
-- Single-screen mode reads the bottom screen to know what is up (pause menu, file select, ability screens). A screen
-  it does not know stays on the top screen view: tap minus or plus to pause and see the bottom screen.
+- Single-screen mode reads the bottom screen to know what is up (msr2ds's classifier: the HUD, menus, the gallery
+  viewer, text such as the prologue's). A screen it reads wrongly stays on the top screen view: tap minus or plus to
+  pause and see the bottom screen.
 
 ## Download and install
 
@@ -69,7 +70,10 @@ works in handheld mode wherever the bottom screen is shown.
 
 In single-screen mode, minus or plus pauses the game and shows the bottom screen (map and Samus screens); it goes
 back when the pause menu closes. Energy, missiles, the Aeion gauge, the selected beam and the Metroid counter are
-drawn over the top screen.
+drawn over the top screen. Menus on the bottom screen (file select, options, amiibo, a new ability's screen) are
+shown by themselves; the gallery viewer shows its picture with the counter beside it; text on the bottom screen's bare
+backdrop (the prologue's lines, the title's prompt) is drawn over the top screen as subtitles, and touching them
+touches that text.
 
 ## The port menu
 

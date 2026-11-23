@@ -9,6 +9,7 @@ msr.nro is built with these, each under its own license:
 | [uam](https://github.com/devkitPro/uam) (devkitPro), commit 5a5afc2 | compiling missing shaders on the Switch | zlib; its parts imported from Mesa are MIT |
 | devkitA64's newlib and libstdc++ | C and C++ runtime | their own licenses, shipped with devkitPro |
 | [gminustwo/msr2ds](https://github.com/gminustwo/msr2ds) `native/runtime/interp_full.c` | the fallback interpreter (`runtime/cpu/interp_arm.c`) | GPL-2.0-or-later |
+| [gminustwo/msr2ds](https://github.com/gminustwo/msr2ds) `src/msr/bottom_classifier.h` | the single-screen bottom screen classifier, ported to C (`runtime/switch/bottom_class.c`) | GPL-2.0-or-later |
 
 Read as reference while writing our own code:
 

@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.7.0 test (interpreter, extras, show newest frame)"
+#define MSR_VERSION "0.7.1 test (single-screen classifier)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -20,6 +20,7 @@
 #include "msr_mem.h"
 #include "sched.h"
 #include "port_menu.h"
+#include "bottom_class.h"
 #include "dk_shaders.h"   // generated (tools/switch/mkshaders.py): hud_vsh, hud_fsh
 
 #include <dirent.h>
@@ -210,47 +211,76 @@ static void display_init(void) {
     g_queue = dkQueueCreate(&qm);
 }
 
-// The game's bottom-screen HUD is up (not a menu, map screen or cutscene): the light blue frame line
-// under the missile count at y 40, dark just above it. Read from the last bottom-screen picture.
-static int hud_on_bottom(void) {
-    const u32* b = g_upload + 400 * 240;
-    int ok = 0;
-    for (int x = 90; x <= 140; x += 25) {
-        u32 line = b[(239 - 40) * 320 + x], above = b[(239 - 37) * 320 + x];
-        int r = line & 0xFF, g = (line >> 8) & 0xFF, bl = (line >> 16) & 0xFF;
-        int ab = (above >> 16) & 0xFF;
-        if (bl > 150 && g > 100 && r < 120 && ab < 80) ok++;
-    }
-    return ok == 3;
-}
+// ---- single-screen mode: what goes on the Switch's screen ----------------------------------------------
+// The bottom screen is classified from its pixels each new picture (bottom_class.c, msr2ds's
+// classifier), and what it shows decides the view. Until 0.7.0 only the file select and the pause
+// menu frame were recognized (two pixel checks), so the gallery viewer, the amiibo screen and the
+// prologue's lines were never shown.
+enum { SS_TOP, SS_HUD, SS_MENU, SS_GALLERY, SS_TEXT };
+static int g_ss_view = SS_TOP;
+static int g_ss_box[4];                        // SS_TEXT: the bottom screen's text (x0, y0, x1, y1, rows from the top)
+static int g_ss_text_dst[4];                   // SS_TEXT: where it is drawn on the Switch's screen (x, y, w, h)
+static unsigned long long g_start_pressed_ns;  // the 3DS Start button's last press (input, below)
+static const char* const k_ss_names[] = {
+    "top screen only",
+    "top screen with the HUD readouts",
+    "the bottom screen's menu",
+    "gallery: the picture with its counter beside it",
+    "top screen with the bottom screen's text as subtitles",
+};
+static const char* const k_bc_names[] = {"nothing yet", "HUD", "emblem or dimmed HUD", "menu", "text"};
+static const char* const k_page_names[] = {"", ", pause map", ", pause Samus page", ", map pins", ", file list", ", file opened", ", gallery viewer"};
 
-// The file select screen ("Samus Files") is on the bottom screen: the light blue lines of its title
-// frame (y 10 at x 60 and 260, y 24 from x 110 to 210), dark just above the top one. Checked against
-// run013's picture of it and the other bottom-screen pictures (gameplay, title).
-static int file_select_on_bottom(void) {
-    const u32* b = g_upload + 400 * 240;
-    static const int pts[5][2] = {{110, 24}, {160, 24}, {210, 24}, {60, 10}, {260, 10}};
-    for (int k = 0; k < 5; k++) {
-        u32 c = b[(239 - pts[k][1]) * 320 + pts[k][0]];
-        int r = c & 0xFF, g = (c >> 8) & 0xFF, bl = (c >> 16) & 0xFF;
-        if (!(bl > 150 && g > 100 && r < 130)) return 0;
+static void single_screen_update(const u32* pic) {
+    BcResult r;
+    bc_classify(pic, &r);
+    int want = SS_TOP;
+    if (r.bottom == BC_HUD) want = SS_HUD;
+    else if (r.bottom == BC_PROMPT) want = SS_TEXT;
+    else if (r.bottom == BC_MENU) want = r.page == BC_PAGE_GALLERY ? SS_GALLERY : SS_MENU;
+    if (want == SS_TEXT && r.x1 > r.x0) {   // the text box follows the lines as they come
+        g_ss_box[0] = r.x0;
+        g_ss_box[1] = r.y0;
+        g_ss_box[2] = r.x1;
+        g_ss_box[3] = r.y1;
     }
-    return ((b[(239 - 9) * 320 + 60] >> 16) & 0xFF) < 80;
-}
-
-// The game's pause menu frame is on the bottom screen: the light blue line under its header (y 24,
-// x 76 to 94 and 223 to 227), dark just above. The map and the Samus screens of the pause menu both
-// have it, and so does the Samus screen the game brings up to explain a new ability; nothing else
-// in runs 10 to 18's bottom-screen pictures does (gameplay HUD, title, file select, logo).
-static int pause_frame_on_bottom(void) {
-    const u32* b = g_upload + 400 * 240;
-    static const int xs[5] = {76, 80, 94, 223, 227};
-    for (int k = 0; k < 5; k++) {
-        u32 c = b[(239 - 24) * 320 + xs[k]];
-        int r = c & 0xFF, g = (c >> 8) & 0xFF, bl = (c >> 16) & 0xFF;
-        if (!(bl > 150 && g > 100 && r < 120)) return 0;
+    unsigned long long now = msr_now_ns();
+    static int cand = -1, cand_n, in_play, menu_asked;
+    static unsigned long long cand_since, hud_seen;
+    if (want == SS_HUD) {
+        hud_seen = now;
+        in_play = 1;
+        menu_asked = 0;
     }
-    return ((b[(239 - 23) * 320 + 67] >> 16) & 0xFF) < 80;
+    if (r.bottom == BC_MENU && r.title_menu) in_play = 0;
+    if (want == cand) {
+        cand_n++;
+    } else {
+        cand = want;
+        cand_n = 1;
+        cand_since = now;
+    }
+    if (want == g_ss_view) return;
+    // a few pictures in a row decide (menus sliding in or out read as other things for a moment);
+    // leaving a menu takes a few more
+    int need = (g_ss_view == SS_MENU || g_ss_view == SS_GALLERY) ? 6 : 3;
+    int held = cand_n >= need && now - cand_since >= 80000000ull;
+    // A menu over play that no Start press asked for (msr2ds compositor.cpp, its #12 and #32): the
+    // HUD misread while picking things up, or one of the game's own screens over play (an elevator's
+    // or a Teleport Station's map, a new ability's). Shown once it has held 1.5 s, or 0.3 s when the
+    // HUD has been gone for a second (after the game's own messages).
+    if (held && want == SS_MENU && in_play && !menu_asked) {
+        if (g_start_pressed_ns && now - g_start_pressed_ns < 2000000000ull) menu_asked = 1;
+        else if (now - cand_since < (now - hud_seen >= 1000000000ull ? 300000000ull : 1500000000ull)) held = 0;
+    }
+    if (!held) return;
+    g_ss_view = want;
+    g_map_view = want == SS_MENU;
+    g_gallery_view = want == SS_GALLERY;
+    static unsigned logged;
+    if (logged++ < 400)
+        msr_receipt("single screen: %s (bottom screen: %s%s)", k_ss_names[want], k_bc_names[r.bottom],
+                    r.bottom == BC_MENU ? k_page_names[r.page] : "");
 }
 
 // The beam column on the right of the bottom screen: three slots (power beam, then the beams the
@@ -363,22 +393,19 @@ static void present(void) {
         DkImageRect r = {0, 0, 0, W, 240, 1};
         dkCmdBufCopyBufferToImage(g_cmd, &src, &sv[k], &r, 0);
     }
-    // single-screen mode: the file select screen comes up by itself (after A on the title screen)
-    // and goes away when the game loads; a few pictures in a row decide, so transitions do not flicker
-    if (fresh) {
-        static int on_count, off_count;
-        if (g_set.layout == LAYOUT_TOP_ONLY && file_select_on_bottom()) { off_count = 0; if (++on_count >= 3 && !g_auto_bottom) { g_auto_bottom = 1; msr_receipt("single screen: file select up, showing the bottom screen"); } }
-        else { on_count = 0; if (++off_count >= 10 && g_auto_bottom) { g_auto_bottom = 0; msr_receipt("single screen: file select gone, back to the top screen"); } }
-        // the pause menu (Start, minus or plus) and the screens explaining a new ability: shown while
-        // the game has them up, so closing them any way (B too) goes back to the top screen
-        static int p_on, p_off;
-        if (g_set.layout == LAYOUT_TOP_ONLY && pause_frame_on_bottom()) {
-            p_off = 0;
-            if (++p_on >= 2 && !g_map_view) { g_map_view = 1; msr_receipt("single screen: pause menu up, showing the bottom screen"); if (g_debug && g_shots_left > 0) { g_shots_left--; g_shot_request = 1; } }
-        } else {
-            p_on = 0;
-            if (++p_off >= 3 && g_map_view) { g_map_view = 0; msr_receipt("single screen: pause menu gone, back to the top screen"); }
+    // single-screen mode: the view follows what the bottom screen shows (single_screen_update)
+    if (fresh && g_set.layout == LAYOUT_TOP_ONLY) {
+        int before = g_ss_view;
+        single_screen_update(g_upload + 400 * 240);
+        if (g_ss_view != before && g_ss_view == SS_MENU && g_debug && g_shots_left > 0) {   // pictures of both screens
+            g_shots_left--;
+            g_shot_request = 1;
         }
+    }
+    if (g_set.layout != LAYOUT_TOP_ONLY && g_ss_view != SS_TOP) {
+        g_ss_view = SS_TOP;
+        g_map_view = 0;
+        g_gallery_view = 0;
     }
     // the screens where the port menu's layout puts them
     Rect tr, br;
@@ -402,15 +429,45 @@ static void present(void) {
         dkCmdBufBlitImage(g_cmd, &hv, &hs, &fbv, &td, DkBlitFlag_FilterLinear, 0);
     } else if (tr.w) dkCmdBufBlitImage(g_cmd, &sv[0], &ts, &fbv, &td, DkBlitFlag_FilterLinear, 0);
     if (br.w) dkCmdBufBlitImage(g_cmd, &sv[1], &bs, &fbv, &bd, DkBlitFlag_FilterLinear, 0);
-    if (g_set.layout == LAYOUT_TOP_ONLY && !g_map_view && !g_auto_bottom && hud_on_bottom()) {
-        // single-screen mode: the bottom screen's readouts, cut out of it and drawn at 2x on the top
-        // one (energy, missiles, Aeion gauge and the ability cross; the selected ability; the
-        // Metroid DNA and Metroids left). Bottom-screen coordinates, rows counted from the top.
-        static struct { int sx, sy, w, h, dx, dy; } k_hud[3] = {
-            {0, 0, 160, 60, 48, 8},              // top left
-            {250, 8, 70, 70, 1240 - 8 - 140, 8},    // top right: the selected beam (its slot, below)
-            {60, 212, 185, 28, 48, 720 - 8 - 56},   // bottom left
+    if (g_set.layout == LAYOUT_TOP_ONLY && (g_ss_view == SS_HUD || (g_ss_view == SS_TEXT && g_ss_box[2] > g_ss_box[0]))) {
+        // single-screen mode: parts of the bottom screen drawn over the top one. With the HUD, its
+        // readouts cut out and drawn at 2x (energy, missiles, Aeion gauge and the ability cross; the
+        // selected ability; the Metroid DNA and Metroids left); with text on the bare backdrop (the
+        // prologue's lines, the title's prompt), the text as subtitles at the bottom, at up to 2x.
+        // Bottom-screen coordinates, rows counted from the top; sw, sh the size drawn.
+        typedef struct { int sx, sy, w, h, dx, dy, sw, sh; } Piece;
+        static const Piece k_hud[3] = {
+            {0, 0, 160, 60, 48, 8, 320, 120},                    // top left
+            {250, 8, 70, 70, 1240 - 8 - 140, 8, 140, 140},       // top right: the selected beam (its slot, below)
+            {60, 212, 185, 28, 48, 720 - 8 - 56, 370, 56},       // bottom left
         };
+        Piece pieces[3];
+        int npieces = 0;
+        if (g_ss_view == SS_HUD) {
+            memcpy(pieces, k_hud, sizeof k_hud);
+            int sl = selected_beam_slot();
+            pieces[1].sy = k_beam_y[sl < 0 ? 0 : sl];
+            npieces = 3;
+        } else {
+            Piece t;
+            t.sx = g_ss_box[0];
+            t.sy = g_ss_box[1];
+            t.w = g_ss_box[2] - g_ss_box[0];
+            t.h = g_ss_box[3] - g_ss_box[1];
+            float sc = 2.0f;
+            if (sc * t.w > 1200.0f) sc = 1200.0f / t.w;
+            if (sc * t.h > 300.0f) sc = 300.0f / t.h;
+            t.sw = (int)(t.w * sc);
+            t.sh = (int)(t.h * sc);
+            t.dx = (FB_W - t.sw) / 2;
+            t.dy = FB_H - 16 - t.sh;
+            g_ss_text_dst[0] = t.dx;
+            g_ss_text_dst[1] = t.dy;
+            g_ss_text_dst[2] = t.sw;
+            g_ss_text_dst[3] = t.sh;
+            pieces[0] = t;
+            npieces = 1;
+        }
         // Drawn (not blitted) so the dark backgrounds can be see-through: hud_fsh.glsl.
         DkGpuAddr hd = dkMemBlockGetGpuAddr(g_hud_data);
         DkViewport vp = {0, 0, FB_W, FB_H, 0.0f, 1.0f};
@@ -442,10 +499,10 @@ static void present(void) {
         DkShader const* hs[2] = {&g_hud_vsh, &g_hud_fsh};
         dkCmdBufBindShaders(g_cmd, DkStageFlag_GraphicsMask, hs, 2);
         dkCmdBufBarrier(g_cmd, DkBarrier_Full, DkInvalidateFlags_Image);   // the blits and uploads into the images are done
-        { int sl = selected_beam_slot(); k_hud[1].sy = k_beam_y[sl < 0 ? 0 : sl]; }
-        for (int k = 0; k < 3; k++) {
-            float rect[8] = {(float)k_hud[k].dx, (float)(FB_H - k_hud[k].dy - 2 * k_hud[k].h), (float)(2 * k_hud[k].w), (float)(2 * k_hud[k].h),
-                             (float)k_hud[k].sx, (float)(240 - k_hud[k].sy - k_hud[k].h), (float)k_hud[k].w, (float)k_hud[k].h};
+        for (int k = 0; k < npieces; k++) {
+            const Piece* q = &pieces[k];
+            float rect[8] = {(float)q->dx, (float)(FB_H - q->dy - q->sh), (float)q->sw, (float)q->sh,
+                             (float)q->sx, (float)(240 - q->sy - q->h), (float)q->w, (float)q->h};
             dkCmdBufPushConstants(g_cmd, hd, 32, 0, 32, rect);
             DkBufExtents ub = {hd, 32};
             dkCmdBufBindUniformBuffers(g_cmd, DkStage_Vertex, 0, &ub, 1);
@@ -674,6 +731,7 @@ static void input_poll(void) {
         msr_receipt("input: buttons %03X at %.1f s (game has shown %u top-screen pictures)", b,
                     (msr_now_ns() - g_start_ns) / 1e9, msr_fb[0].swaps);
     }
+    if ((b & 0x008u) && !(last_b & 0x008u)) g_start_pressed_ns = msr_now_ns();   // the 3DS Start button
     last_b = b;
     msr_buttons = b;
     HidAnalogStickState s = padGetStickPos(&g_pad, 0);
@@ -688,6 +746,14 @@ static void input_poll(void) {
         int x = ((int)ts.touches[0].x - br.x) * 320 / br.w, y = ((int)ts.touches[0].y - br.y) * 240 / br.h;
         if ((int)ts.touches[0].x >= br.x && (int)ts.touches[0].y >= br.y && x < 320 && y < 240) {
             msr_touch_down = 1; msr_touch_x = (u16)x; msr_touch_y = (u16)y;
+        }
+    } else if (!g_menu_open && g_ss_view == SS_TEXT && g_ss_text_dst[2] > 0 && hidGetTouchScreenStates(&ts, 1) && ts.count > 0) {
+        // single-screen subtitles: a touch on them is a touch on that text (the prologue's skip)
+        int tx = (int)ts.touches[0].x - g_ss_text_dst[0], ty = (int)ts.touches[0].y - g_ss_text_dst[1];
+        if (tx >= 0 && ty >= 0 && tx < g_ss_text_dst[2] && ty < g_ss_text_dst[3]) {
+            msr_touch_down = 1;
+            msr_touch_x = (u16)(g_ss_box[0] + tx * (g_ss_box[2] - g_ss_box[0]) / g_ss_text_dst[2]);
+            msr_touch_y = (u16)(g_ss_box[1] + ty * (g_ss_box[3] - g_ss_box[1]) / g_ss_text_dst[3]);
         }
     }
     {   // both sticks pressed in: a picture of the Switch output now

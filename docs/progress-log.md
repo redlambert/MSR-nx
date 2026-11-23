@@ -1,5 +1,21 @@
 # Progress log (newest first)
 
+## 2026-11-22 (evening): 0.7.1, single-screen mode from msr2ds's bottom screen classifier
+
+- Alec's 0.7.0 test: the extras work (all galleries, every difficulty, Fusion suit). Single-screen mode never showed
+  the gallery viewer's picture (its counter flipped the old file select check on and off), the amiibo screen or the
+  prologue's lines. The original FurryLilManChild/MSR-nx and every version since recognized only the file select and
+  the pause menu frame (two pixel checks); nothing in 0.7.0 changed that.
+- runtime/switch/bottom_class.c: msr2ds src/msr/bottom_classifier.h in C (HUD, emblem, menu with its page, text),
+  its thresholds unchanged. Checked against the C++ original on 20000 synthetic pictures (rules, columns, text,
+  noise, dark and bright backdrops): the same class, page and text box every time.
+- main_nx.c single_screen_update: a new view once a class holds 3 pictures and 80 ms (6 to leave a menu). Views:
+  top only (emblem, dimmed HUD), HUD readouts, the bottom screen's menu, gallery (top 960x576 with the bottom at 1x
+  beside it, the big-small layout's places), and subtitles (the text's box from the bottom screen, at up to 2x,
+  bottom middle, drawn with the HUD shader so the backdrop is see-through; touches on it go to that text). A menu over
+  play without a Start press waits 1.5 s, or 0.3 s when the HUD has been gone a second (msr2ds #12, #32: the HUD
+  misread at pickups, the game's own screens over play).
+
 ## 2026-11-22: 0.7.0 test, things borrowed from msr2ds 2.2.0
 
 - msr2ds since 2.0 is a static recompilation too (its own recompiler, Vulkan/OpenGL on SDL); its runtime is not ours,

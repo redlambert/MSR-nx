@@ -27,8 +27,8 @@ typedef struct {
 
 extern PortSettings g_set;
 extern int g_menu_open;
-extern int g_map_view;      // single-screen mode: the game's pause menu frame is on the bottom screen (main_nx.c), so that is shown
-extern int g_auto_bottom;   // single-screen mode: the bottom screen shown by itself (the file select screen is up)   // single-screen mode (top screen only): the bottom screen shown instead, a minus tap toggles it
+extern int g_map_view;       // single-screen mode: a menu is on the bottom screen (main_nx.c single_screen_update), so that is shown
+extern int g_gallery_view;   // single-screen mode: the gallery viewer, its picture with the bottom screen's counter beside it
 
 void port_menu_init(const char* settings_path);
 // Feeds the Switch buttons (held) each frame. Returns the 3DS button bits for the game (0 while

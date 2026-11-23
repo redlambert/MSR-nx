@@ -24,7 +24,7 @@ static void fps_apply(void) {
 PortSettings g_set;
 int g_menu_open;
 int g_map_view;
-int g_auto_bottom;
+int g_gallery_view;
 static int g_beam_request;
 int port_menu_beam_request(void) { int r = g_beam_request; g_beam_request = 0; return r; }
 static char g_path[256];
@@ -369,8 +369,16 @@ void port_menu_layout(Rect* t, Rect* b) {
     case LAYOUT_SIDE: *t = (Rect){0, 147, 711, 427}; *b = (Rect){711, 147, 569, 427}; break;       // both 1.78x
     case LAYOUT_STACKED: *t = (Rect){340, 0, 600, 360}; *b = (Rect){400, 360, 480, 360}; break;    // both 1.5x
     case LAYOUT_TOP_ONLY:   // 3x, the top screen or (map view) the bottom one
-        if (g_map_view || g_auto_bottom) { *t = (Rect){0, 0, 0, 0}; *b = (Rect){160, 0, 960, 720}; }
-        else { *t = (Rect){40, 0, 1200, 720}; *b = (Rect){0, 0, 0, 0}; }
+        if (g_gallery_view) {   // the gallery's picture, its counter beside it (as the big-small layout)
+            *t = (Rect){0, 72, 960, 576};
+            *b = (Rect){960, 240, 320, 240};
+        } else if (g_map_view) {
+            *t = (Rect){0, 0, 0, 0};
+            *b = (Rect){160, 0, 960, 720};
+        } else {
+            *t = (Rect){40, 0, 1200, 720};
+            *b = (Rect){0, 0, 0, 0};
+        }
         break;
     }
 }
