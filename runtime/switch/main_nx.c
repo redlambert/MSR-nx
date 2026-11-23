@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.7.6 test (minimap drawn)"
+#define MSR_VERSION "0.7.7 test (beam icon still)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -552,49 +552,32 @@ static void present(void) {
             npieces = 2;
             // The selected beam, always shown, as tall as the energy and Aeion readout and right of it
             // (Alec: the top right is the minimap's place)
-            // The game pulses the selected slot; drawn from a copy holding each pixel's brightest over the
-            // last 1.5 to 3 s (two periods of 1.5 s, longer than the pulse), it stays still (Alec: the
-            // pulse distracts). Started over when the selected beam changes. The bottom picture read here
-            // is one picture old (the GPU makes the new one later in this command list).
+            // The game pulses the selected slot. It is drawn from a copy holding each pixel's brightest since
+            // the selected beam last changed, so it stays still at its brightest (Alec: the pulse distracts).
+            // 0.7.6 let the copy expire every 1.5 s and started it over whenever the slot's brightest pixel
+            // fell under 240, and the pulse itself does that: it restarted mid-pulse and flashed. Now only a
+            // change of the selected beam starts it over; greyed out (Morph Ball) the beam reader finds no
+            // lit slot, which is such a change. The bottom picture read here is one picture old (the GPU
+            // makes the new one later in this command list).
             Piece b = k_hud[2];
             int sl = selected_beam_slot();
             int sy = k_beam_y[sl < 0 ? 0 : sl];
             b.sy = (float)sy;
             b.img = 1;
             if (fresh) {
-                static u32 hold_a[70 * 70], hold_b[70 * 70];
+                static u32 hold[70 * 70];
                 static int hold_slot = -2;
-                static unsigned long long period_ns;
                 const u32* bot = g_upload + 400 * 240;
                 int row0 = 239 - (sy + 69);   // the slot's first row in the picture (rows stored bottom to top)
-                // Greyed out (Morph Ball): the lit slot's brightest pixel drops under 240, where lit it
-                // always reaches 255, pulse or not (msr2ds bottom_classifier.h ReadBeamSlots). Then the
-                // slot is shown as it is, so the grey comes at once.
-                u32 peak = 0;
-                for (int j = 0; j < 70; j += 2)
-                    for (int i = 0; i < 70; i += 2) {
-                        u32 v = px_bright(bot[(row0 + j) * 320 + 250 + i]);
-                        if (v > peak) peak = v;
-                    }
-                int restart = sl != hold_slot || peak < 240;
-                int next_period = !restart && now - period_ns > 1500000000ull;
-                if (restart || next_period) period_ns = now;
+                int restart = sl != hold_slot;
                 hold_slot = sl;
                 u32* out = g_upload + BEAM_STAGING;
                 for (int j = 0; j < 70; j++)
                     for (int i = 0; i < 70; i++) {
                         u32 c = bot[(row0 + j) * 320 + 250 + i];
-                        u32* a = &hold_a[j * 70 + i];
-                        u32* p = &hold_b[j * 70 + i];
-                        if (restart) {
-                            *a = c;
-                            *p = c;
-                        } else if (next_period) {
-                            *p = *a;
-                            *a = c;
-                        }
-                        if (px_bright(c) > px_bright(*a)) *a = c;
-                        out[j * 70 + i] = px_bright(*p) > px_bright(*a) ? *p : *a;
+                        u32* h = &hold[j * 70 + i];
+                        if (restart || sl < 0 || px_bright(c) > px_bright(*h)) *h = c;   // greyed: as it is
+                        out[j * 70 + i] = *h;
                     }
                 DkImageView bv;
                 dkImageViewDefaults(&bv, &g_beam_img);
