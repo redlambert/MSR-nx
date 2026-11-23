@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "boot.h"
+#include "extras.h"
 #include "msr_log.h"
 #include "msr_mem.h"
 #include "sched.h"
@@ -52,6 +53,7 @@ Cpu* msr_boot(const char* dir) {
     msr_mem_map(ro_addr, ro_pages * 0x1000, MSR_PERM_R, MSR_STATE_CODE, "rodata");
     msr_mem_map(data_addr, data_pages * 0x1000 + bss, MSR_PERM_RW, MSR_STATE_PRIVATE, "data+bss");
     memcpy(g_mem + MSR_CODE_BASE, code, code_size);
+    msr_extras_boot();   // before the game reads its memory size
     u32 stack_size = stack ? (stack + 0xFFF) & ~0xFFFu : 0x10000;
     msr_mem_map(MSR_STACK_TOP - stack_size, stack_size, MSR_PERM_RW, MSR_STATE_PRIVATE, "stack");
     msr_mem_map(0x1FF80000u, 0x2000, MSR_PERM_R, MSR_STATE_SHARED, "config+shared page");
