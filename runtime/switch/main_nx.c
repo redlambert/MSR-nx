@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.7.7 test (beam icon still)"
+#define MSR_VERSION "0.7.8 test (beam icon as the game draws it)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -77,9 +77,6 @@ static DkQueue g_queue;
 static DkSwapchain g_swap;
 static DkMemBlock g_fb_mem, g_cmd_mem, g_tex_mem, g_up_mem, g_panel_mem, g_fps_mem;
 static DkImage g_fb[2], g_scr[2], g_panel_img, g_fps_img;
-static DkMemBlock g_beam_mem;   // single-screen mode: the selected beam's slot without its pulse (main_nx.c present)
-static DkImage g_beam_img;      // 320x240 like the bottom screen's image; only the slot's 70x70 is written
-#define BEAM_STAGING (0xB0000 / 4)   // in g_upload (after the two screens): the held slot, 70x70
 // single-screen HUD: its shaders, a uniform block, and the bottom screen's descriptors
 static DkMemBlock g_hud_code, g_hud_data;
 static DkShader g_hud_vsh, g_hud_fsh;
@@ -133,10 +130,6 @@ static void display_init(void) {
     mm.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
     g_tex_mem = dkMemBlockCreate(&mm);
     for (int k = 0; k < 2; k++) dkImageInitialize(&g_scr[k], &sl[k], g_tex_mem, offs[k]);
-    dkMemBlockMakerDefaults(&mm, g_dev, ((u32)dkImageLayoutGetSize(&sl[1]) + 0xFFFF) & ~0xFFFFu);
-    mm.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
-    g_beam_mem = dkMemBlockCreate(&mm);
-    dkImageInitialize(&g_beam_img, &sl[1], g_beam_mem, 0);
 
     dkMemBlockMakerDefaults(&mm, g_dev, 0x80000);   // (400 + 320) * 240 * 4 = 691200 > 0x80000? use 1 MiB
     mm.size = 0x100000;
@@ -188,7 +181,7 @@ static void display_init(void) {
         dkShaderInitialize(&g_hud_vsh, &sm2);
         dkShaderMakerDefaults(&sm2, g_hud_code, vsz);
         dkShaderInitialize(&g_hud_fsh, &sm2);
-        // 0x000 uniforms (48 bytes), 0x100 image descriptors (bottom screen, held beam), 0x200 sampler descriptors (nearest, linear)
+        // 0x000 uniforms (48 bytes), 0x100 image descriptor, 0x200 sampler descriptors (nearest, linear)
         dkMemBlockMakerDefaults(&mm, g_dev, 0x1000);
         mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
         g_hud_data = dkMemBlockCreate(&mm);
@@ -196,8 +189,6 @@ static void display_init(void) {
         DkImageView iv;
         dkImageViewDefaults(&iv, &g_scr[1]);
         dkImageDescriptorInitialize((DkImageDescriptor*)(d + 0x100), &iv, false, false);
-        dkImageViewDefaults(&iv, &g_beam_img);   // image 1: the selected beam without its pulse
-        dkImageDescriptorInitialize((DkImageDescriptor*)(d + 0x100 + sizeof(DkImageDescriptor)), &iv, false, false);
         DkSampler smp;
         dkSamplerDefaults(&smp);   // nearest: the readouts stay as sharp as the game drew them
         dkSamplerDescriptorInitialize((DkSamplerDescriptor*)(d + 0x200), &smp);
@@ -299,13 +290,6 @@ static int map_marker(float* x, float* y, int* focus) {
     *x = (l + w * 0.5f) * 320.0f;
     *y = (t + h * 0.5f) * 240.0f;
     return 1;
-}
-
-// a picture word's brightest channel
-static inline u32 px_bright(u32 c) {
-    u32 r = c & 0xFF, g = (c >> 8) & 0xFF, b = (c >> 16) & 0xFF;
-    u32 m = r > g ? r : g;
-    return m > b ? m : b;
 }
 
 static void single_screen_update(const u32* pic) {
@@ -536,7 +520,7 @@ static void present(void) {
         // prologue's lines, the title's prompt), the subtitles (g_ss_card).
         // Bottom-screen coordinates, rows counted from the top; sw, sh the size drawn; look how the
         // fragment shader draws it (hud_fsh.glsl).
-        typedef struct { float sx, sy, w, h, dx, dy, sw, sh; float look[4]; int img; } Piece;   // img: 1 the held beam image
+        typedef struct { float sx, sy, w, h, dx, dy, sw, sh; float look[4]; } Piece;
         static const Piece k_hud[3] = {
             {0, 0, 160, 60, 48, 8, 320, 120, {0, 0, 0, 0}},                       // top left
             {60, 212, 185, 28, 48, 720 - 8 - 56, 370, 56, {0, 0, 0, 0}},          // bottom left
@@ -552,39 +536,9 @@ static void present(void) {
             npieces = 2;
             // The selected beam, always shown, as tall as the energy and Aeion readout and right of it
             // (Alec: the top right is the minimap's place)
-            // The game pulses the selected slot. It is drawn from a copy holding each pixel's brightest since
-            // the selected beam last changed, so it stays still at its brightest (Alec: the pulse distracts).
-            // 0.7.6 let the copy expire every 1.5 s and started it over whenever the slot's brightest pixel
-            // fell under 240, and the pulse itself does that: it restarted mid-pulse and flashed. Now only a
-            // change of the selected beam starts it over; greyed out (Morph Ball) the beam reader finds no
-            // lit slot, which is such a change. The bottom picture read here is one picture old (the GPU
-            // makes the new one later in this command list).
             Piece b = k_hud[2];
             int sl = selected_beam_slot();
-            int sy = k_beam_y[sl < 0 ? 0 : sl];
-            b.sy = (float)sy;
-            b.img = 1;
-            if (fresh) {
-                static u32 hold[70 * 70];
-                static int hold_slot = -2;
-                const u32* bot = g_upload + 400 * 240;
-                int row0 = 239 - (sy + 69);   // the slot's first row in the picture (rows stored bottom to top)
-                int restart = sl != hold_slot;
-                hold_slot = sl;
-                u32* out = g_upload + BEAM_STAGING;
-                for (int j = 0; j < 70; j++)
-                    for (int i = 0; i < 70; i++) {
-                        u32 c = bot[(row0 + j) * 320 + 250 + i];
-                        u32* h = &hold[j * 70 + i];
-                        if (restart || sl < 0 || px_bright(c) > px_bright(*h)) *h = c;   // greyed: as it is
-                        out[j * 70 + i] = *h;
-                    }
-                DkImageView bv;
-                dkImageViewDefaults(&bv, &g_beam_img);
-                DkCopyBuf src = {up + BEAM_STAGING * 4, 0, 0};
-                DkImageRect r = {250, (u32)row0, 0, 70, 70, 1};
-                dkCmdBufCopyBufferToImage(g_cmd, &src, &bv, &r, 0);
-            }
+            b.sy = (float)k_beam_y[sl < 0 ? 0 : sl];
             pieces[npieces++] = b;
             if (g_set.minimap) {
                 // The map around Samus, top right: 120x80 of the bottom screen's map (x 0-252, y 58-213,
@@ -706,22 +660,21 @@ static void present(void) {
         dss.depthTestEnable = false;
         dss.depthWriteEnable = false;
         dkCmdBufBindDepthStencilState(g_cmd, &dss);
-        dkCmdBufBindImageDescriptorSet(g_cmd, hd + 0x100, 2);
+        dkCmdBufBindImageDescriptorSet(g_cmd, hd + 0x100, 1);
         dkCmdBufBindSamplerDescriptorSet(g_cmd, hd + 0x200, 2);
         DkResHandle th = dkMakeTextureHandle(0, linear ? 1 : 0);
         dkCmdBufBindTextures(g_cmd, DkStage_Fragment, 0, &th, 1);
-        int bound_linear = linear, bound_img = 0;
+        int bound_linear = linear;
         DkShader const* hs[2] = {&g_hud_vsh, &g_hud_fsh};
         dkCmdBufBindShaders(g_cmd, DkStageFlag_GraphicsMask, hs, 2);
         dkCmdBufBarrier(g_cmd, DkBarrier_Full, DkInvalidateFlags_Image);   // the blits and uploads into the images are done
         for (int k = 0; k < npieces; k++) {
             const Piece* q = &pieces[k];
             int want_linear = linear || q->look[3] > 0.5f;   // look[3]: filtered (a readout at an odd scale)
-            if (want_linear != bound_linear || q->img != bound_img) {
-                DkResHandle h = dkMakeTextureHandle((u32)q->img, want_linear ? 1 : 0);
+            if (want_linear != bound_linear) {
+                DkResHandle h = dkMakeTextureHandle(0, want_linear ? 1 : 0);
                 dkCmdBufBindTextures(g_cmd, DkStage_Fragment, 0, &h, 1);
                 bound_linear = want_linear;
-                bound_img = q->img;
             }
             float rect[12] = {q->dx, FB_H - q->dy - q->sh, q->sw, q->sh,
                               q->sx, 240.0f - q->sy - q->h, q->w, q->h,
