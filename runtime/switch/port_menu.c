@@ -11,6 +11,7 @@
 
 void dkr_set_sync_mode(int m);   // gpu/dk/dk_pica.c
 void dkr_set_img_path(int on);    // gpu/dk/dk_pica.c
+void dkr_set_trim(int level);     // gpu/dk/dk_pica.c
 void dkr_set_scale(int halves);   // gpu/dk/dk_pica.c
 extern int dkr_frame_limit;       // gpu/dk/dk_pica.c
 extern volatile u32 msr_frame_limit_ms;   // os/sched.c
@@ -53,7 +54,7 @@ static const char* sw_name(u64 b) {
     return "(none)";
 }
 
-enum { ROW_LAYOUT, ROW_MINIMAP, ROW_SCALE, ROW_RATE, ROW_NEWEST, ROW_GXT, ROW_CLOCK, ROW_GPU, ROW_FPS, ROW_SYNC, ROW_COPIES,
+enum { ROW_LAYOUT, ROW_MINIMAP, ROW_SCALE, ROW_RATE, ROW_NEWEST, ROW_TRIM, ROW_GXT, ROW_CLOCK, ROW_GPU, ROW_FPS, ROW_SYNC, ROW_COPIES,
        ROW_GALLERY, ROW_DIFFICULTY, ROW_FUSION, ROW_BIND0, ROW_RESET = ROW_BIND0 + NBIND, ROW_CLOSE, NROWS };
 #define ROW_EXTRAS ROW_GALLERY   // the first extras row (a gap above it)
 static const u32 k_extra_bit[3] = {MSR_EXTRA_GALLERIES, MSR_EXTRA_DIFFICULTY, MSR_EXTRA_FUSION};   // ROW_GALLERY onward
@@ -112,7 +113,7 @@ static void save(void) {
     FILE* f = fopen(g_path, "w");
     if (!f) return;
     fprintf(f, "layout=%d\nclock=%d\ngpu=%d\nfps=%d\nsync=%d\ncopies=%d\nscale=%d\nfps60=%d\ngxthread=%d\n", g_set.layout, g_set.clock, g_set.gpu, g_set.show_fps, g_set.sync, g_set.copies, g_set.scale, g_set.fps60, g_set.gxthread);
-    fprintf(f, "newest=%d\nextras=%d\nminimap=%d\n", g_set.newest, g_set.extras, g_set.minimap);
+    fprintf(f, "newest=%d\nextras=%d\nminimap=%d\ntrim=%d\n", g_set.newest, g_set.extras, g_set.minimap, g_set.trim);
     for (int k = 0; k < NBIND; k++) fprintf(f, "bind%d=%llu\n", k, (unsigned long long)g_set.bind[k]);
     fclose(f);
 }
@@ -123,6 +124,7 @@ void port_menu_init(const char* settings_path) {
     g_set.clock = CLOCK_STOCK;
     g_set.sync = 1;   // Fewer waits: played on since test 13 without problems
     g_set.newest = 1;
+    g_set.trim = 3;
     g_set.minimap = 1;
     memcpy(g_set.bind, k_bind_default, sizeof g_set.bind);
     FILE* f = fopen(g_path, "r");
@@ -142,6 +144,7 @@ void port_menu_init(const char* settings_path) {
             else if (sscanf(line, "fps60=%d", &v) == 1) g_set.fps60 = v != 0;
             else if (sscanf(line, "gxthread=%d", &v) == 1) g_set.gxthread = v != 0;
             else if (sscanf(line, "newest=%d", &v) == 1) g_set.newest = v != 0;
+            else if (sscanf(line, "trim=%d", &v) == 1 && v >= 0 && v < 4) g_set.trim = v;
             else if (sscanf(line, "minimap=%d", &v) == 1) g_set.minimap = v != 0;
             else if (sscanf(line, "extras=%d", &v) == 1) g_set.extras = v & (MSR_EXTRA_GALLERIES | MSR_EXTRA_DIFFICULTY | MSR_EXTRA_FUSION);
             else if (sscanf(line, "bind%d=%llu", &k, &b) == 2 && k >= 0 && k < NBIND) g_set.bind[k] = b;
@@ -155,6 +158,7 @@ void port_menu_init(const char* settings_path) {
     fps_apply();
     msr_gx_async = !g_set.gxthread;
     dkr_frame_limit = g_set.newest;
+    dkr_set_trim(g_set.trim);
     msr_extras = (u32)g_set.extras;
     msr_receipt("menu: settings %s: layout %s, CPU clock %s", found ? "loaded" : "default", k_layout_names[g_set.layout],
                 k_clock_names[g_set.clock]);
@@ -196,10 +200,10 @@ static void draw(void) {
     fill(0, PANEL_H - 4, PANEL_W, 4, RGBA(230, 120, 30));
     text(24, 16, "MSR-nx port menu", RGBA(255, 200, 120));
     int y = 52;
-    for (int r = 0; r < NROWS; r++, y += 24) {
+    for (int r = 0; r < NROWS; r++, y += 23) {   // 23: the Speed-ups row made 24 too tall for the panel
         if (r == ROW_EXTRAS || r == ROW_BIND0 || r == ROW_RESET) y += 8;
         int sel = r == g_row;
-        if (sel) fill(12, y - 4, PANEL_W - 24, 24, RGBA(50, 70, 110));
+        if (sel) fill(12, y - 4, PANEL_W - 24, 23, RGBA(50, 70, 110));
         u32 c = sel ? RGBA(255, 255, 255) : RGBA(190, 200, 215);
         char v[64] = "";
         const char* label = "";
@@ -212,6 +216,7 @@ static void draw(void) {
         else if (r == ROW_SCALE) { static const char* sn[3] = {"1x (native)", "1.5x", "2x"}; label = "3D screen resolution"; snprintf(v, sizeof v, "< %s >", sn[g_set.scale]); }
         else if (r == ROW_COPIES) { label = "Copies"; snprintf(v, sizeof v, "< %s >", g_set.copies ? "Through VRAM" : "From images"); }
         else if (r == ROW_FPS) { label = "Frame counter"; snprintf(v, sizeof v, "< %s >", g_set.show_fps ? "On" : "Off"); }
+        else if (r == ROW_TRIM) { static const char* tn[4] = {"Off", "Fills", "+ Waits", "+ Early depth"}; label = "Speed-ups (test)"; snprintf(v, sizeof v, "< %s >", tn[g_set.trim]); }
         else if (r == ROW_NEWEST) { label = "Show newest frame"; snprintf(v, sizeof v, "< %s >", g_set.newest ? "On" : "Off"); }
         else if (r == ROW_MINIMAP) { label = "Minimap (single screen)"; snprintf(v, sizeof v, "< %s >", g_set.minimap ? "On" : "Off"); }
         else if (r >= ROW_GALLERY && r <= ROW_FUSION) {
@@ -295,6 +300,11 @@ u32 port_menu_input(u64 held) {
             g_set.scale = (g_set.scale + 3 + dx) % 3;
             dkr_set_scale(2 + g_set.scale);
             msr_receipt("menu: 3D screen resolution %s", g_set.scale == 0 ? "1x" : g_set.scale == 1 ? "1.5x" : "2x");
+            g_dirty = 1;
+        }
+        if (dx && g_row == ROW_TRIM) {
+            g_set.trim = (g_set.trim + 4 + dx) % 4;
+            dkr_set_trim(g_set.trim);
             g_dirty = 1;
         }
         if (dx && g_row == ROW_SYNC) { g_set.sync = (g_set.sync + 3 + dx) % 3; dkr_set_sync_mode(g_set.sync); g_dirty = 1; }

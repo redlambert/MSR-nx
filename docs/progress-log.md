@@ -1,5 +1,31 @@
 # Progress log (newest first)
 
+## 2026-11-23: 0.7.9 test, GPU speed-ups
+
+- Alec's 0.7.8 receipt (handheld, 2x, GPU 614, 60 fps, Show newest frame on): 34 to 48 pictures a second, about
+  40 most of the time, every one reaching the screen. GPU idle about 5%: draws about 15.9 ms and VRAM work about
+  8.6 ms a picture (24.5 ms; 60 needs 16.7). CPU not the limit (game idle about 85%), no compile waits, the right
+  eye almost all skipped. A picture: about 160 draws, 3 fills, 3 copies, 6 transfers, 1 store, 1 texture decode,
+  about 27 barriers. Caution on the split: a VRAM segment's timestamp comes before its opening barrier, so the
+  time draws take to finish draining can land in "VRAM work"; read the total, not the split.
+- Port menu "Speed-ups (test)", cumulative, default + Early depth (3), Off = 0.7.8:
+  1 Fills: a GX fill of exactly one whole render target (one surface overlapping, its exact bytes) is only the
+  clear at its next draw; the VRAM fill is kept (vfill_pending) and run by vfill_range when anything needs those
+  bytes first (store_range, so sync_range, tex_get, transfers and copies, vram_will_write; dk_fill; img_source
+  sends it the VRAM way; surf_reset_all). Dropped once the target is drawn into (its store writes every byte).
+  Depth targets are never stored, so theirs normally never run.
+  2 Waits: kernels with no destination image (fill, copy, transfer, store, the from-image ones) skip their
+  closing barrier. Draws never read the VRAM buffer; the next kernel, vram_upload and the DMA copy now open with
+  gpu_barrier (free when clean); the CPU reads after flush(1); the screen output opens with its own. Source images
+  of those kernels go on a list (8); a draw into one (color or depth) or surf_upload into one barriers first.
+  3 Early depth: fs_select found only the plain shader for draws that could test depth early (pack and cache
+  lacked the EZ_BIT key), and never asked for it. Now it asks the compiler for that variant in the background
+  and keeps drawing with the plain one; the cached choice is redone when a compile lands.
+- Receipt: "early depth: N draws; M more could have..." and "speed-ups ...: fills left to the clear (run later),
+  barriers left out (waits for an image instead)".
+- main_nx.c: the VRAM stats array was 9 words and dkr_vram_stats writes K_COUNT (13): now 16.
+- Port menu rows 23 px apart (26 rows). Compile-checked (clang, aarch64, libnx and deko3d headers); not run.
+
 ## 2026-11-22 (late): 0.7.5, minimap top right, selected beam on change
 
 - Alec's 0.7.4 screenshot: the minimap's box shows but is empty. hud_fsh.glsl tested look.x > 1.5 (the subtitles'

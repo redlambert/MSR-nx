@@ -94,6 +94,7 @@ Up/down picks a row, left/right changes it, A confirms, B or minus closes. Setti
 | Gallery unlocks | The amiibo extras (Metroid II art, concept art, the sound test) in Options > Gallery |
 | Every difficulty | Normal, Hard and Fusion offered for every file's New Game, a new file's too |
 | Fusion suit | Samus in the Fusion suit at any difficulty (damage stays the difficulty's). Her model changes at the next save load or area load; the HUD changes at once |
+| Speed-ups (test) | GPU savings, each step keeping the ones before it: Fills (a clear of a whole render target skips its VRAM fill), + Waits (no barrier after VRAM work that only writes VRAM), + Early depth (missing early-depth shaders compiled in the background). + Early depth is the default; Off is 0.7.8 for comparing |
 | GPU sync, Copies | Renderer options for testing; leave them at Fewer waits and From images |
 | Button mapping | Any Switch button for each 3DS button and for Next beam |
 
