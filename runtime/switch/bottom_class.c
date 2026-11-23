@@ -173,6 +173,16 @@ void bc_classify(const uint32_t* pic, BcResult* out) {
     // backdrop; its pages are told apart by the rule under their title (y ~24): map page x 61-259,
     // Samus page x 61-320, map pins x 101-219.
     if (longest_rule(0, H, 150, 30).length >= 100) {
+        // MSR-nx: the gallery viewer is tested first. In msr2ds's pictures the title menus stand on
+        // black; in this port's they keep the game's backdrop (Alec's 0.7.1 receipt: the file select
+        // and gallery read as pause pages), so its black test never passed and the gallery's cyan
+        // edges were never looked for.
+        if (longest_column(30, 42, 50, 190) >= 100 && longest_column(278, 290, 50, 190) >= 100) {
+            out->bottom = BC_MENU;
+            out->title_menu = 1;
+            out->page = BC_PAGE_GALLERY;
+            return;
+        }
         if (dark_fraction(6) > .3f) {
             out->bottom = BC_MENU;
             out->title_menu = 1;

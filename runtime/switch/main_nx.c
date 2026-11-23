@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.7.1 test (single-screen classifier)"
+#define MSR_VERSION "0.7.2 test (gallery view, steady subtitles)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -247,6 +247,7 @@ static void single_screen_update(const u32* pic) {
     unsigned long long now = msr_now_ns();
     static int cand = -1, cand_n, in_play, menu_asked;
     static unsigned long long cand_since, hud_seen;
+    if (want == SS_GALLERY && in_play) want = SS_MENU;   // the gallery is a title screen: in play, a misread
     if (want == SS_HUD) {
         hud_seen = now;
         in_play = 1;
@@ -263,7 +264,8 @@ static void single_screen_update(const u32* pic) {
     if (want == g_ss_view) return;
     // a few pictures in a row decide (menus sliding in or out read as other things for a moment);
     // leaving a menu takes a few more
-    int need = (g_ss_view == SS_MENU || g_ss_view == SS_GALLERY) ? 6 : 3;
+    // (on the title screens, where the menus sliding about read as the emblem more often, 15)
+    int need = (g_ss_view == SS_MENU || g_ss_view == SS_GALLERY) ? (in_play ? 6 : 15) : 3;
     int held = cand_n >= need && now - cand_since >= 80000000ull;
     // A menu over play that no Start press asked for (msr2ds compositor.cpp, its #12 and #32): the
     // HUD misread while picking things up, or one of the game's own screens over play (an elevator's
@@ -449,18 +451,19 @@ static void present(void) {
             pieces[1].sy = k_beam_y[sl < 0 ? 0 : sl];
             npieces = 3;
         } else {
+            // One fixed placement for all text: the bottom screen at 2x, centred, its last row 8 px
+            // above the Switch screen's bottom; only the text's box of it is drawn. Fitting each box
+            // instead moved and resized the text as lines came and the cursor after them blinked
+            // (Alec's 0.7.1 video).
             Piece t;
             t.sx = g_ss_box[0];
             t.sy = g_ss_box[1];
             t.w = g_ss_box[2] - g_ss_box[0];
             t.h = g_ss_box[3] - g_ss_box[1];
-            float sc = 2.0f;
-            if (sc * t.w > 1200.0f) sc = 1200.0f / t.w;
-            if (sc * t.h > 300.0f) sc = 300.0f / t.h;
-            t.sw = (int)(t.w * sc);
-            t.sh = (int)(t.h * sc);
-            t.dx = (FB_W - t.sw) / 2;
-            t.dy = FB_H - 16 - t.sh;
+            t.sw = 2 * t.w;
+            t.sh = 2 * t.h;
+            t.dx = (FB_W - 640) / 2 + 2 * t.sx;
+            t.dy = FB_H - 8 - 480 + 2 * t.sy;
             g_ss_text_dst[0] = t.dx;
             g_ss_text_dst[1] = t.dy;
             g_ss_text_dst[2] = t.sw;

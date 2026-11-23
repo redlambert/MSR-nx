@@ -1,5 +1,17 @@
 # Progress log (newest first)
 
+## 2026-11-22 (night): 0.7.2, gallery view and steady subtitles
+
+- Alec's 0.7.1 receipt and video: the prologue's lines now show, but the file select, gallery and other title menus
+  read as pause pages ("menu, pause map", "map pins"): in this port's bottom picture the title menus keep the game's
+  backdrop, so msr2ds's "title menus stand on black" test (dark_fraction(6) > .3) never passed and the gallery's cyan
+  edges were never looked for. bottom_class.c now tests the gallery's edges first among menus (only off play: in play
+  a gallery read is taken as a menu). On the title screens a menu now holds 15 pictures before it gives way (its
+  slides read as the emblem: menu and top-only views alternated in the receipt).
+- The subtitles moved and changed size as lines came and the cursor after them blinked (each picture's text box was
+  fitted to the screen). Now one fixed placement: the bottom screen at 2x, centred, its last row 8 px above the
+  Switch screen's bottom, and only the text's box of it drawn.
+
 ## 2026-11-22 (evening): 0.7.1, single-screen mode from msr2ds's bottom screen classifier
 
 - Alec's 0.7.0 test: the extras work (all galleries, every difficulty, Fusion suit). Single-screen mode never showed
