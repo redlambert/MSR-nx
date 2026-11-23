@@ -563,7 +563,7 @@ static void present(void) {
                 if (sx > 252.0f - 120.0f) sx = 252.0f - 120.0f;
                 if (sy < 58.0f) sy = 58.0f;
                 if (sy > 213.0f - 80.0f) sy = 213.0f - 80.0f;
-                Piece m = {sx, sy, 120, 80, 1240 - 180, 8, 180, 120, {3.0f, 0.85f, 1.15f, 1.0f}};   // 1.5x, as tall as the readouts, filtered
+                Piece m = {sx, sy, 120, 80, 1240 - 8 - 180, 8, 180, 120, {3.0f, 0.85f, 1.15f, 1.0f}};   // 1.5x, as tall as the readouts, filtered
                 pieces[npieces++] = m;
                 // what the minimap saw, every 5 s (0.7.4 drew an empty box): the marker, the window, and how
                 // bright the bottom screen is in it and in the whole map area
