@@ -111,10 +111,16 @@ static int g_test;
 #define SHOWN_N 4
 static u32 g_shown_addr[SHOWN_N];   // targets seen going to the top screen (hires_capture)
 static int g_shown_n, g_shown_changed;
-void dkr_set_gpu_test(int bits) {
-    g_test_req = bits & 3;
-    static const char* names[4] = {"Normal", "Plain pixels", "Effect layers at 1x", "Plain pixels and effect layers at 1x"};
-    msr_receipt("gpu: GPU test set to %s", names[bits & 3]);
+void dkr_capture_arm(void);
+// 0 Normal, 1 Plain pixels, 2 Capture 1 s (Normal drawing; a capture starts at the next picture).
+// (Effect layers at 1x, bit 1 of g_test, is no longer on the menu: 0.8.0 showed both larger targets
+// are the top screen's own two pictures.)
+void dkr_set_gpu_test(int mode) {
+    static const char* names[3] = {"Normal", "Plain pixels", "Capture 1 s"};
+    if (mode < 0 || mode > 2) mode = 0;
+    g_test_req = mode == 1 ? 1 : 0;
+    msr_receipt("gpu: GPU test set to %s", names[mode]);
+    if (mode == 2) dkr_capture_arm();
 }
 static int is_shown(u32 addr) {
     for (int k = 0; k < g_shown_n; k++) if (g_shown_addr[k] == addr) return 1;
@@ -322,6 +328,127 @@ void dkr_target_report(void) {
     }
 }
 
+
+// ---- frame capture (port menu GPU test "Capture 1 s") ----------------------------------------------
+// For 60 top-screen pictures every GPU step is timed by itself: a full barrier and a timestamp
+// before it, a full barrier and a timestamp after it, so its time is its own (the game runs slower
+// meanwhile). Then sdmc:/switch/msr/capture.csv gets a line per step and the receipt a summary.
+enum { CAP_DRAW = 0, CAP_KERNEL0 = 1, CAP_VRAM_UPLOAD = 20, CAP_SURF_UPLOAD, CAP_TEX_UPLOAD, CAP_LUT_UPLOAD,
+       CAP_READBACK, CAP_DMA, CAP_CLEAR, CAP_KINDS };
+#define CAP_MAX 32768
+#define CAP_FRAMES 60
+typedef struct {
+    u8 kind, frame, scaled, ez, lit, lights, tex, state;   // state: 1 depth test, 2 depth write, 4 blend, 8 alpha test, 16 stencil
+    u32 target, n, area;
+    u16 w, h;
+    u64 key;
+} CapOp;
+static DkMemBlock g_cap_mem;
+static CapOp* g_cap_ops;
+static u32 g_cap_n;
+static volatile int g_cap_req;
+static int g_cap_left, g_cap_frame;
+static void cap_stamp(u32 slot) {
+    dkCmdBufReportCounter(g_cmd, DkCounter_Timestamp, dkMemBlockGetGpuAddr(g_cap_mem) + slot * 16);
+}
+static CapOp* cap_begin(int kind) {
+    if (g_cap_left <= 0 || !g_cap_ops || g_cap_n >= CAP_MAX) return 0;
+    dkCmdBufBarrier(g_cmd, DkBarrier_Full, 0);
+    u32 i = g_cap_n++;
+    cap_stamp(2 * i);
+    CapOp* o = &g_cap_ops[i];
+    memset(o, 0, sizeof *o);
+    o->kind = (u8)kind;
+    o->frame = (u8)g_cap_frame;
+    return o;
+}
+static void cap_end(CapOp* o) {
+    if (!o) return;
+    dkCmdBufBarrier(g_cmd, DkBarrier_Full, 0);
+    cap_stamp(2 * (u32)(o - g_cap_ops) + 1);
+}
+static const char* cap_kind_name(int k) {
+    static const char* kn[13] = {"fill", "copy", "transfer", "store", "load", "texdecode", "screen", "transfer_img",
+                                 "copy_img", "hires", "texup", "imgcopy", "dump"};
+    if (k == CAP_DRAW) return "draw";
+    if (k >= CAP_KERNEL0 && k < CAP_KERNEL0 + 13) return kn[k - CAP_KERNEL0];
+    switch (k) {
+    case CAP_VRAM_UPLOAD: return "vram_upload";
+    case CAP_SURF_UPLOAD: return "surf_upload";
+    case CAP_TEX_UPLOAD: return "tex_upload";
+    case CAP_LUT_UPLOAD: return "lut_upload";
+    case CAP_READBACK: return "readback";
+    case CAP_DMA: return "dma";
+    case CAP_CLEAR: return "clear";
+    }
+    return "other";
+}
+void dkr_capture_arm(void) { g_cap_req = 1; msr_receipt("capture: armed; it starts at the next top-screen picture"); }
+static void cap_start(void) {
+    g_cap_req = 0;
+    if (!g_cap_mem) {
+        DkMemBlockMaker mm;
+        dkMemBlockMakerDefaults(&mm, g_dev, CAP_MAX * 2 * 16);
+        mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+        g_cap_mem = dkMemBlockCreate(&mm);
+    }
+    if (!g_cap_ops) g_cap_ops = (CapOp*)malloc(CAP_MAX * sizeof(CapOp));
+    if (!g_cap_mem || !g_cap_ops) { msr_receipt("capture: out of memory, not started"); return; }
+    memset(dkMemBlockGetCpuAddr(g_cap_mem), 0, CAP_MAX * 2 * 16);
+    g_cap_n = 0;
+    g_cap_frame = 0;
+    g_cap_left = CAP_FRAMES;
+    msr_receipt("capture: started (%d top-screen pictures, 3D screen at %d.%dx)", CAP_FRAMES, g_scale / 2, g_scale & 1 ? 5 : 0);
+}
+static void cap_finish(void) {
+    flush(1);   // every step done and stamped
+    const u8* base = (const u8*)dkMemBlockGetCpuAddr(g_cap_mem);
+    double kind_us[CAP_KINDS] = {0};
+    unsigned kind_n[CAP_KINDS] = {0};
+    double lit_us = 0, unlit_us = 0;
+    FILE* f = fopen("sdmc:/switch/msr/capture.csv", "w");
+    if (f) {
+        fprintf(f, "# MSR-nx capture: %u steps over %d top-screen pictures, 3D screen at %d.%dx\n", g_cap_n, CAP_FRAMES,
+                g_scale / 2, g_scale & 1 ? 5 : 0);
+        fprintf(f, "frame,kind,gpu_us,target,w,h,larger,shader,early_depth,lit,lights,textures,count,area,depth_test,depth_write,blend,alpha_test,stencil\n");
+    }
+    for (u32 i = 0; i < g_cap_n; i++) {
+        const CapOp* o = &g_cap_ops[i];
+        u64 t0 = *(volatile const u64*)(base + 2 * i * 16 + 8), t1 = *(volatile const u64*)(base + (2 * i + 1) * 16 + 8);
+        double us = (t0 && t1 && t1 >= t0) ? (dkTimestampToNs(t1) - dkTimestampToNs(t0)) / 1000.0 : -1;
+        if (us >= 0 && o->kind < CAP_KINDS) {
+            kind_us[o->kind] += us;
+            kind_n[o->kind]++;
+            if (o->kind == CAP_DRAW) { if (o->lit) lit_us += us; else unlit_us += us; }
+        }
+        if (f)
+            fprintf(f, "%u,%s,%.1f,%08X,%u,%u,%u,%016llX,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", o->frame, cap_kind_name(o->kind), us,
+                    (unsigned)o->target, o->w, o->h, o->scaled, (unsigned long long)o->key, o->ez, o->lit, o->lights, o->tex,
+                    (unsigned)o->n, (unsigned)o->area, o->state & 1, (o->state >> 1) & 1, (o->state >> 2) & 1, (o->state >> 3) & 1,
+                    (o->state >> 4) & 1);
+    }
+    if (f) fclose(f);
+    msr_receipt("capture: %u steps saved to sdmc:/switch/msr/capture.csv%s", g_cap_n, f ? "" : " (could not write the file)");
+    double total = 0;
+    for (int k = 0; k < CAP_KINDS; k++) total += kind_us[k];
+    msr_receipt("capture: GPU time per picture %.2f ms (each step on its own; normal play overlaps some of it)", total / CAP_FRAMES / 1000.0);
+    for (int pass = 0; pass < CAP_KINDS; pass++) {   // the kinds, most time first
+        int best = -1;
+        for (int k = 0; k < CAP_KINDS; k++) if (kind_n[k] && (best < 0 || kind_us[k] > kind_us[best])) best = k;
+        if (best < 0) break;
+        msr_receipt("capture:   %-12s %7.2f ms a picture, %5u steps", cap_kind_name(best), kind_us[best] / CAP_FRAMES / 1000.0,
+                    kind_n[best]);
+        kind_n[best] = 0;
+    }
+    msr_receipt("capture:   draws with lighting %.2f ms a picture, without %.2f ms", lit_us / CAP_FRAMES / 1000.0, unlit_us / CAP_FRAMES / 1000.0);
+}
+static void cap_frame(void) {   // at each top-screen picture
+    if (g_cap_req && g_cap_left <= 0) { cap_start(); return; }
+    if (g_cap_left <= 0) return;
+    g_cap_frame++;
+    if (--g_cap_left == 0) cap_finish();
+}
+
 // Runs one of the vram_ops.inc kernels: q = four uvec4 parameters, n = invocations.
 static void kernel(int k, const u32 q[16], u32 n, const DkImage* src, const DkImage* dst) {
     if (!n) return;
@@ -359,14 +486,21 @@ static void kernel(int k, const u32 q[16], u32 n, const DkImage* src, const DkIm
     }
     DkShader const* sh = &g_k[k];
     dkCmdBufBindShaders(g_cmd, DkStageFlag_Compute, &sh, 1);
+    CapOp* co = cap_begin(CAP_KERNEL0 + k);
+    if (co) { co->target = q[0]; co->n = n; co->tex = src != 0; co->lit = dst != 0; }   // lit, tex: reads / writes an image
     dkCmdBufDispatchCompute(g_cmd, (n + 63) / 64, 1, 1);
+    cap_end(co);
     GPU_WORK();
     gpu_barrier();
 }
 
 // The CPU wrote guest VRAM [a, a + n): send it to the GPU's copy, in order with queued work.
+static CapOp* cap_begin(int kind);
+static void cap_end(CapOp* o);
 static void vram_upload(u32 a, u32 n) {
     ts_mark(TS_VRAM);
+    CapOp* co = cap_begin(CAP_VRAM_UPLOAD);
+    if (co) { co->target = a; co->n = n; }
     while (n) {
         u32 chunk = n > (4u << 20) ? (4u << 20) : n;
         u32 off = dyn_alloc((chunk + 3) & ~3u, 256);
@@ -376,6 +510,7 @@ static void vram_upload(u32 a, u32 n) {
         a += chunk;
         n -= chunk;
     }
+    cap_end(co);
     gpu_barrier();
 }
 
@@ -399,7 +534,10 @@ static void surf_upload(Surf* s) {
     dkImageViewDefaults(&v, &s->img);
     DkCopyBuf cb = {g_dyn_gpu + off, 0, 0};
     DkImageRect r = {0, 0, 0, s->w, s->h, 1};
+    CapOp* co = cap_begin(CAP_SURF_UPLOAD);
+    if (co) { co->target = s->addr; co->w = (u16)s->w; co->h = (u16)s->h; }
     dkCmdBufCopyBufferToImage(g_cmd, &cb, &v, &r, 0);
+    cap_end(co);
     GPU_WORK();
     s->cpu_dirty = 0;
     MSR_PERF_END(PERF_SURF_UPLOAD);
@@ -415,7 +553,10 @@ static void surf_readback(Surf* s) {
     dkImageViewDefaults(&v, &s->img);
     DkCopyBuf cb = {g_rb_gpu, 0, 0};
     DkImageRect r = {0, 0, 0, s->w, s->h, 1};
+    CapOp* co = cap_begin(CAP_READBACK);
+    if (co) { co->target = s->addr; co->w = (u16)s->w; co->h = (u16)s->h; }
     dkCmdBufCopyImageToBuffer(g_cmd, &v, &r, &cb, 0);
+    cap_end(co);
     GPU_WORK();
     flush(1);
     armDCacheFlush(g_rb_cpu, bytes);   // drop any stale lines before reading what the GPU wrote
@@ -817,7 +958,10 @@ static DkImage* tex_get(u32 paddr, u32 fmt, u32 w, u32 h) {
     dkImageViewDefaults(&iv, &hit->img);
     DkCopyBuf cb = {g_dyn_gpu + off, 0, 0};
     DkImageRect r = {0, 0, 0, w, h, 1};
+    CapOp* co = cap_begin(CAP_TEX_UPLOAD);
+    if (co) { co->target = v; co->w = (u16)w; co->h = (u16)h; co->n = fmt; }
     dkCmdBufCopyBufferToImage(g_cmd, &cb, &iv, &r, 0);
+    cap_end(co);
     GPU_WORK();
     return &hit->img;
 }
@@ -831,7 +975,9 @@ static void lut_update(void) {
     dkImageViewDefaults(&iv, &g_lut_img);
     DkCopyBuf cb = {g_dyn_gpu + off, 0, 0};
     DkImageRect r = {0, 0, 0, 256, 24, 1};
+    CapOp* co = cap_begin(CAP_LUT_UPLOAD);
     dkCmdBufCopyBufferToImage(g_cmd, &cb, &iv, &r, 0);
+    cap_end(co);
     GPU_WORK();
 }
 
@@ -1063,6 +1209,9 @@ static int dk_draw(int indexed) {
         g_bound_depth = ds;
     }
     if (cs->clear_pending || (ds && ds->clear_pending)) {
+        CapOp* cc = cap_begin(CAP_CLEAR);
+        if (cc) { cc->target = cs->addr; cc->w = (u16)cs->sw; cc->h = (u16)cs->sh; cc->scaled = (u8)cs->scaled;
+                  cc->state = (u8)((cs->clear_pending ? 4 : 0) | (ds && ds->clear_pending ? 1 : 0)); }
         DkScissor full = {0, 0, cs->sw, cs->sh};
         dkCmdBufSetScissors(g_cmd, 0, &full, 1);
         DkColorWriteState all;
@@ -1080,6 +1229,7 @@ static int dk_draw(int indexed) {
             GPU_WORK();
             ds->clear_pending = 0;
         }
+        cap_end(cc);
     }
     DkBufExtents sb[2] = {{g_program_addr, (4096 + 128) * 4}, {g_dyn_gpu + voff, (vbytes + 3) & ~3u}};
     dkCmdBufBindStorageBuffers(g_cmd, DkStage_Vertex, 0, sb, 2);
@@ -1194,11 +1344,21 @@ static int dk_draw(int indexed) {
     dkCmdBufBindShaders(g_cmd, DkStageFlag_GraphicsMask, sh, 2);
     u32 mode = (r[0x25E] >> 8) & 3;
     DkPrimitive prim = mode == 1 ? DkPrimitive_TriangleStrip : mode == 2 ? DkPrimitive_TriangleFan : DkPrimitive_Triangles;
+    CapOp* co = cap_begin(CAP_DRAW);
+    if (co) {
+        int lit = (r[0x8F] & 1) && !(r[0x1C6] & 1);
+        co->target = cs->addr; co->w = (u16)cs->sw; co->h = (u16)cs->sh; co->scaled = (u8)cs->scaled;
+        co->key = pica_fs_key(); co->ez = (u8)ez; co->lit = (u8)lit; co->lights = lit ? (u8)((r[0x1C2] & 7) + 1) : 0;
+        co->tex = (u8)(r[0x80] & 7); co->n = n; co->area = sc.width * sc.height;
+        co->state = (u8)((dss.depthTestEnable && (dm & 1) ? 1 : 0) | (dss.depthWriteEnable ? 2 : 0) | (cst.blendEnableMask ? 4 : 0) |
+                         (r[0x104] & 1 ? 8 : 0) | (dss.stencilTestEnable ? 16 : 0));
+    }
     if (indexed) {
         dkCmdBufBindIdxBuffer(g_cmd, DkIdxFormat_Uint16, g_dyn_gpu + ioff);
         dkCmdBufDrawIndexed(g_cmd, prim, n, 1, 0, 0, 0);
         GPU_WORK();
     } else dkCmdBufDraw(g_cmd, prim, n, 1, 0, 0);
+    cap_end(co);
     GPU_WORK();
     if (r[0x113] && ((dm >> 8) & 0xF)) cs->gpu_dirty = 1;
     if (++g_draws_since_flush >= 256) flush(0);
@@ -1487,7 +1647,10 @@ static int dk_gx(int op, const u32* d) {
             store_range(src, n);
             vram_will_write(dst, n);
             ts_mark(TS_VRAM);
+            CapOp* co = cap_begin(CAP_DMA);
+            if (co) { co->target = dst; co->n = n; }
             dkCmdBufCopyBuffer(g_cmd, g_vram_gpu + (src - VRAM_BASE), g_vram_gpu + (dst - VRAM_BASE), n);
+            cap_end(co);
             GPU_WORK();
             gpu_barrier();
             vram_touch(dst, n);
@@ -1515,9 +1678,11 @@ static DkFence g_latch_fence;
 static int g_latch_fence_set;
 static unsigned long long g_latch_wait_ns;
 static unsigned g_latch_waits;
+static void cap_frame(void);
 static void dk_latch(int screen) {
     flush(0);
     if (screen != 0) return;
+    cap_frame();
     if (dkr_frame_limit && g_latch_fence_set) {
         unsigned long long t0 = msr_now_ns();
         dkFenceWait(&g_latch_fence, -1);

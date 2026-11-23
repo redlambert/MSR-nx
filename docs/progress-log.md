@@ -1,5 +1,21 @@
 # Progress log (newest first)
 
+## 2026-11-23 (night): 0.8.1 test, frame capture
+
+- Alec's 0.8.0 receipt (2x, 614 MHz, 60 fps): Normal 37 to 40; Plain pixels 49 to 55 (pica_fsh.glsl about 30% of a
+  picture); Effects at 1x no change and no visible difference: both larger 240 x 400 targets (1F08CA00, 1F0EA600)
+  go to the top screen (the game's two top pictures), so there is no effect layer. VRAM work stayed about 8.5 ms a
+  picture with Plain pixels (draws down about 7.6 ms), so it is its own cost, not draw time landing in its
+  segment; about 3.7 ms at 1x. 768 MHz: 1.5x 56 to 59, 2x 44 to 48. The 1F08CA00 240x320 target (native) is the
+  same address drawn at the bottom screen's size.
+- GPU test row: Normal, Plain pixels, Capture 1 s (Effects at 1x off the menu; its code stays, unused). Capture:
+  from the next top-screen latch, 60 pictures with every draw, clear, kernel, VRAM upload, DMA copy, surface upload,
+  texture upload, LUT upload and readback between a full barrier and a timestamp on each side (cap_begin, cap_end;
+  CAP_MAX 32768 steps). Then sdmc:/switch/msr/capture.csv (frame, kind, GPU us, target, size, larger, fragment
+  shader key, early depth, lit, lights, texture units, count, scissor area, depth test, depth write, blend, alpha
+  test, stencil) and a receipt summary by kind. For kernels: target q[0], count the invocations, lit 1 when it
+  writes an image, textures 1 when it reads one. Not timed: the main thread's screen output.
+
 ## 2026-11-23 (evening): 0.8.0 test, GPU cost per target and the GPU test row
 
 - Alec's 0.7.9 receipts: every Speed-ups step and GPU sync Lean ran the same, 37 to 40 at 2x and 60 fps. Fills

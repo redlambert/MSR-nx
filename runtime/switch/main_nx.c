@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.8.0 test (GPU cost per target, GPU test row)"
+#define MSR_VERSION "0.8.1 test (frame capture)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"

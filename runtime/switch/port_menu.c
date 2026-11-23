@@ -213,7 +213,7 @@ static void draw(void) {
         else if (r == ROW_SCALE) { static const char* sn[3] = {"1x (native)", "1.5x", "2x"}; label = "3D screen resolution"; snprintf(v, sizeof v, "< %s >", sn[g_set.scale]); }
         else if (r == ROW_COPIES) { label = "Copies"; snprintf(v, sizeof v, "< %s >", g_set.copies ? "Through VRAM" : "From images"); }
         else if (r == ROW_FPS) { label = "Frame counter"; snprintf(v, sizeof v, "< %s >", g_set.show_fps ? "On" : "Off"); }
-        else if (r == ROW_GTEST) { static const char* tn[4] = {"Normal", "Plain pixels", "Effects at 1x", "Both"}; label = "GPU test"; snprintf(v, sizeof v, "< %s >", tn[g_set.gtest & 3]); }
+        else if (r == ROW_GTEST) { static const char* tn[3] = {"Normal", "Plain pixels", "Capture 1 s"}; label = "GPU test"; snprintf(v, sizeof v, "< %s >", tn[g_set.gtest % 3]); }
         else if (r == ROW_NEWEST) { label = "Show newest frame"; snprintf(v, sizeof v, "< %s >", g_set.newest ? "On" : "Off"); }
         else if (r == ROW_MINIMAP) { label = "Minimap (single screen)"; snprintf(v, sizeof v, "< %s >", g_set.minimap ? "On" : "Off"); }
         else if (r >= ROW_GALLERY && r <= ROW_FUSION) {
@@ -300,7 +300,7 @@ u32 port_menu_input(u64 held) {
             g_dirty = 1;
         }
         if (dx && g_row == ROW_GTEST) {   // not saved: every start is Normal
-            g_set.gtest = (g_set.gtest + 4 + dx) % 4;
+            g_set.gtest = (g_set.gtest + 3 + dx) % 3;   // Capture: starts when the game draws again
             dkr_set_gpu_test(g_set.gtest);
         }
         if (dx && g_row == ROW_SYNC) { g_set.sync = (g_set.sync + 3 + dx) % 3; dkr_set_sync_mode(g_set.sync); g_dirty = 1; }
