@@ -89,6 +89,7 @@ Up/down picks a row, left/right changes it, A confirms, B or minus closes. Setti
 | CPU clock | Stock (1020 MHz) or boost (1785 MHz) |
 | GPU clock | System default, 460, 614 or 768 MHz |
 | Frame counter | On or off |
+| Minimap (single screen) | On (the default): the bottom screen's map around Samus in the top right during play |
 | Show newest frame | On (the default): the GPU never runs more than about one picture ahead, so the newest picture reaches the screen when the GPU is the limit (60 fps at 2x). Off for comparing |
 | Gallery unlocks | The amiibo extras (Metroid II art, concept art, the sound test) in Options > Gallery |
 | Every difficulty | Normal, Hard and Fusion offered for every file's New Game, a new file's too |

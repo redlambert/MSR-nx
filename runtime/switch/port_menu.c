@@ -53,7 +53,7 @@ static const char* sw_name(u64 b) {
     return "(none)";
 }
 
-enum { ROW_LAYOUT, ROW_SCALE, ROW_RATE, ROW_NEWEST, ROW_GXT, ROW_CLOCK, ROW_GPU, ROW_FPS, ROW_SYNC, ROW_COPIES,
+enum { ROW_LAYOUT, ROW_MINIMAP, ROW_SCALE, ROW_RATE, ROW_NEWEST, ROW_GXT, ROW_CLOCK, ROW_GPU, ROW_FPS, ROW_SYNC, ROW_COPIES,
        ROW_GALLERY, ROW_DIFFICULTY, ROW_FUSION, ROW_BIND0, ROW_RESET = ROW_BIND0 + NBIND, ROW_CLOSE, NROWS };
 #define ROW_EXTRAS ROW_GALLERY   // the first extras row (a gap above it)
 static const u32 k_extra_bit[3] = {MSR_EXTRA_GALLERIES, MSR_EXTRA_DIFFICULTY, MSR_EXTRA_FUSION};   // ROW_GALLERY onward
@@ -112,7 +112,7 @@ static void save(void) {
     FILE* f = fopen(g_path, "w");
     if (!f) return;
     fprintf(f, "layout=%d\nclock=%d\ngpu=%d\nfps=%d\nsync=%d\ncopies=%d\nscale=%d\nfps60=%d\ngxthread=%d\n", g_set.layout, g_set.clock, g_set.gpu, g_set.show_fps, g_set.sync, g_set.copies, g_set.scale, g_set.fps60, g_set.gxthread);
-    fprintf(f, "newest=%d\nextras=%d\n", g_set.newest, g_set.extras);
+    fprintf(f, "newest=%d\nextras=%d\nminimap=%d\n", g_set.newest, g_set.extras, g_set.minimap);
     for (int k = 0; k < NBIND; k++) fprintf(f, "bind%d=%llu\n", k, (unsigned long long)g_set.bind[k]);
     fclose(f);
 }
@@ -123,6 +123,7 @@ void port_menu_init(const char* settings_path) {
     g_set.clock = CLOCK_STOCK;
     g_set.sync = 1;   // Fewer waits: played on since test 13 without problems
     g_set.newest = 1;
+    g_set.minimap = 1;
     memcpy(g_set.bind, k_bind_default, sizeof g_set.bind);
     FILE* f = fopen(g_path, "r");
     int found = 0;
@@ -141,6 +142,7 @@ void port_menu_init(const char* settings_path) {
             else if (sscanf(line, "fps60=%d", &v) == 1) g_set.fps60 = v != 0;
             else if (sscanf(line, "gxthread=%d", &v) == 1) g_set.gxthread = v != 0;
             else if (sscanf(line, "newest=%d", &v) == 1) g_set.newest = v != 0;
+            else if (sscanf(line, "minimap=%d", &v) == 1) g_set.minimap = v != 0;
             else if (sscanf(line, "extras=%d", &v) == 1) g_set.extras = v & (MSR_EXTRA_GALLERIES | MSR_EXTRA_DIFFICULTY | MSR_EXTRA_FUSION);
             else if (sscanf(line, "bind%d=%llu", &k, &b) == 2 && k >= 0 && k < NBIND) g_set.bind[k] = b;
         }
@@ -211,6 +213,7 @@ static void draw(void) {
         else if (r == ROW_COPIES) { label = "Copies"; snprintf(v, sizeof v, "< %s >", g_set.copies ? "Through VRAM" : "From images"); }
         else if (r == ROW_FPS) { label = "Frame counter"; snprintf(v, sizeof v, "< %s >", g_set.show_fps ? "On" : "Off"); }
         else if (r == ROW_NEWEST) { label = "Show newest frame"; snprintf(v, sizeof v, "< %s >", g_set.newest ? "On" : "Off"); }
+        else if (r == ROW_MINIMAP) { label = "Minimap (single screen)"; snprintf(v, sizeof v, "< %s >", g_set.minimap ? "On" : "Off"); }
         else if (r >= ROW_GALLERY && r <= ROW_FUSION) {
             static const char* xn[3] = {"Gallery unlocks", "Every difficulty", "Fusion suit"};
             label = xn[r - ROW_GALLERY];
@@ -296,6 +299,11 @@ u32 port_menu_input(u64 held) {
         }
         if (dx && g_row == ROW_SYNC) { g_set.sync = (g_set.sync + 3 + dx) % 3; dkr_set_sync_mode(g_set.sync); g_dirty = 1; }
         if ((dx || (down & HidNpadButton_A)) && g_row == ROW_FPS) { g_set.show_fps = !g_set.show_fps; g_dirty = 1; }
+        if ((dx || (down & HidNpadButton_A)) && g_row == ROW_MINIMAP) {
+            g_set.minimap = !g_set.minimap;
+            msr_receipt("menu: minimap %s", g_set.minimap ? "on" : "off");
+            g_dirty = 1;
+        }
         if ((dx || (down & HidNpadButton_A)) && g_row == ROW_NEWEST) {
             g_set.newest = !g_set.newest;
             dkr_frame_limit = g_set.newest;

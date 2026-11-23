@@ -6,6 +6,7 @@
 //     0.45 brightness nothing, above 0.65 all, after look.z's gain (the title's prompt pulses, and its
 //     dim phases would vanish); look.y the opacity.
 //  2: the dark card behind the text, look.y its opacity.
+//  3: the minimap: look.y its opacity, look.z a brightness gain.
 #version 460
 layout (std140, binding = 0) uniform Rects {
     vec4 dst;
@@ -21,6 +22,10 @@ void main() {
         return;
     }
     vec3 c = texture(bottom, v_uv).rgb;
+    if (look.x > 2.5) {
+        o = vec4(min(c * look.z, vec3(1.0)), look.y);
+        return;
+    }
     if (look.x > 0.5) {
         c = min(c * look.z, vec3(1.0));
         float m = max(c.r, max(c.g, c.b));

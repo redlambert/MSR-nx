@@ -1,5 +1,15 @@
 # Progress log (newest first)
 
+## 2026-11-22 (late): 0.7.4, the minimap
+
+- Single-screen play draws the bottom screen's map around Samus at 2x in the top right, under the beam slot: 120x80 of
+  the map area (x 0-252, y 58-213), centred on her marker and eased after it (12 per second), clamped to the area.
+  Her marker comes from the game's own minimap (msr2ds native/runtime/msr/minimap.cpp: game object 0x76F314, HUD
+  handle +0x17FC, minimap +0x550 vtable 0x6E6120, her icon +0x280 vtable 0x6E5FF8, its rect at +0x10/+0x1C); the four
+  code words msr2ds checks match our code.bin. Without a marker, or while the game's map shows a place of its own
+  (the DNA scanner's way on: +0x22A/+0x22B), the map's middle. hud_fsh.glsl look 3 (85% opacity, 1.15 gain). Port
+  menu row "Minimap (single screen)", on by default; the panel is 712 rows tall now.
+
 ## 2026-11-22 (late): 0.7.3, the subtitles as msr2ds draws them
 
 - Alec's 0.7.2 videos: the fixed 2x placement put the title's "Press A to Start" over the logo, the prologue's text

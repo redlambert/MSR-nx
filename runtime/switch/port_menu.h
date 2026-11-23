@@ -21,6 +21,7 @@ typedef struct {
     int fps60;         // frame rate: 0 the 3DS's 30, 1 60 (os/sched.c msr_frame_limit_ms)
     int copies;        // GX copies and transfers: 0 from render target images, 1 through VRAM (dk_pica.c img_source)
     int newest;        // Show newest frame: 1 the GPU's frame queue limit (dk_pica.c dkr_frame_limit), 0 off
+    int minimap;       // single-screen mode: 1 the bottom screen's map around Samus drawn in the top right during play
     int extras;        // MSR_EXTRA_* bits (os/extras.h): galleries, every difficulty, Fusion suit
     u64 bind[NBIND];   // Switch button (HidNpadButton_*) for A, B, X, Y, L, R, Start, Select, Next beam
 } PortSettings;
@@ -36,7 +37,7 @@ void port_menu_init(const char* settings_path);
 u32 port_menu_input(u64 held);
 // The menu panel, PANEL_W x PANEL_H RGBA, when it changed since the last call (else 0).
 #define PANEL_W 800
-#define PANEL_H 700
+#define PANEL_H 712
 const u32* port_menu_panel(void);
 // Where the screens go on the 1280x720 output for the current layout (w or h 0: not shown).
 typedef struct { int x, y, w, h; } Rect;

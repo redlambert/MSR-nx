@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.7.3 test (subtitles as msr2ds draws them)"
+#define MSR_VERSION "0.7.4 test (minimap)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -246,6 +246,51 @@ static const char* const k_ss_names[] = {
 };
 static const char* const k_bc_names[] = {"nothing yet", "HUD", "emblem or dimmed HUD", "menu", "text"};
 static const char* const k_page_names[] = {"", ", pause map", ", pause Samus page", ", map pins", ", file list", ", file opened", ", gallery viewer"};
+
+// ---- the minimap (single-screen play) ----------------------------------------------------------------
+// After msr2ds native/runtime/msr/minimap.cpp: Samus's marker where the game's own minimap draws it, read
+// from the game's interface objects (the colour of the picture alone mistook a Missile Reload Station's
+// icon for her, in msr2ds). The game object (0x76F314) holds a handle at +0x17FC to the HUD, which holds
+// one at +0x550 to the minimap (vtable 0x6E6120), which holds one at +0x280 to Samus's icon (vtable
+// 0x6E5FF8); a handle's object is at its +8. The icon keeps where it is drawn: top left at +0x10, size at
+// +0x1C, fractions of the 320x240 screen. The minimap's +0x22A or +0x22B set: it shows a place of the
+// game's choosing (the DNA scanner's way on), not Samus's.
+static int map_valid(u32 a) {
+    return a >= 0x00100000u && msr_mem_query(a).state != MSR_STATE_FREE;
+}
+static u32 map_held(u32 owner, u32 offset) {
+    if (!owner || !map_valid(owner + offset + 4)) return 0;
+    u32 h = rd32(owner + offset);
+    return h && map_valid(h + 12) ? rd32(h + 8) : 0;
+}
+static float map_rf(u32 a) {
+    u32 w = rd32(a);
+    float f;
+    memcpy(&f, &w, 4);
+    return f;
+}
+// 1 and Samus's marker (bottom-screen pixels) when the game's minimap has one; *focus set while it shows
+// a place of its own.
+static int map_marker(float* x, float* y, int* focus) {
+    static int supported = -1;
+    if (supported < 0) {
+        supported = rd32(0x1A4D30) == 0xE2800B05u && rd32(0x1A4D34) == 0xE2800FFFu && rd32(0x1AE62C) == 0xE5900550u &&
+                    rd32(0x507E24) == 0xE5940280u;
+        if (!supported) msr_receipt("minimap: the game's code is not as expected; the minimap stays on the map's middle");
+    }
+    *focus = 0;
+    if (!supported) return 0;
+    u32 minimap = map_held(map_held(rd32(0x76F314u), 0x17FC), 0x550);
+    if (!minimap || !map_valid(minimap + 0x290) || rd32(minimap) != 0x6E6120u) return 0;
+    *focus = rd8(minimap + 0x22A) || rd8(minimap + 0x22B);
+    u32 icon = map_held(minimap, 0x280);
+    if (!icon || !map_valid(icon + 0x60) || rd32(icon) != 0x6E5FF8u) return 0;
+    float l = map_rf(icon + 0x10), t = map_rf(icon + 0x14), w = map_rf(icon + 0x1C), h = map_rf(icon + 0x20);
+    if (!(l > -4.0f && l < 4.0f) || !(t > -4.0f && t < 4.0f) || !(w > 0.0f && w < 1.0f) || !(h > 0.0f && h < 1.0f)) return 0;
+    *x = (l + w * 0.5f) * 320.0f;
+    *y = (t + h * 0.5f) * 240.0f;
+    return 1;
+}
 
 static void single_screen_update(const u32* pic) {
     BcResult r;
@@ -481,7 +526,7 @@ static void present(void) {
             {250, 8, 70, 70, 1240 - 8 - 140, 8, 140, 140, {0, 0, 0, 0}},       // top right: the selected beam (its slot, below)
             {60, 212, 185, 28, 48, 720 - 8 - 56, 370, 56, {0, 0, 0, 0}},       // bottom left
         };
-        Piece pieces[3];
+        Piece pieces[4];
         int npieces = 0;
         int linear = 0;   // the text at 1.5x is filtered; the readouts at 2x stay sharp
         if (g_ss_view == SS_HUD) {
@@ -489,6 +534,32 @@ static void present(void) {
             int sl = selected_beam_slot();
             pieces[1].sy = (float)k_beam_y[sl < 0 ? 0 : sl];
             npieces = 3;
+            if (g_set.minimap) {
+                // the map around Samus: 120x80 of the bottom screen's map (x 0-252, y 58-213, under the energy
+                // bar and above the counters), at 2x under the beam slot, eased after her marker (msr2ds)
+                static float cx = 125.0f, cy = 135.0f;   // the map's middle, where the game keeps her marker
+                static unsigned long long last_ns;
+                unsigned long long now = msr_now_ns();
+                float dt = last_ns && now > last_ns ? (float)((now - last_ns) / 1e9) : 0.0f;
+                last_ns = now;
+                float mx = 125.0f, my = 135.0f;
+                int focus = 0;
+                if (!map_marker(&mx, &my, &focus) || focus) {
+                    mx = 125.0f;
+                    my = 135.0f;
+                }
+                float k = dt * 12.0f > 1.0f ? 1.0f : dt * 12.0f;
+                cx += (mx - cx) * k;
+                cy += (my - cy) * k;
+                float sx = cx - 60.0f, sy = cy - 40.0f;
+                if (sx < 0.0f) sx = 0.0f;
+                if (sx > 252.0f - 120.0f) sx = 252.0f - 120.0f;
+                if (sy < 58.0f) sy = 58.0f;
+                if (sy > 213.0f - 80.0f) sy = 213.0f - 80.0f;
+                Piece m = {sx, sy, 120, 80, 1240 - 240, 156, 240, 160, {3.0f, 0.85f, 1.15f, 0.0f}};
+                pieces[3] = m;
+                npieces = 4;
+            }
         } else {
             static unsigned long long last_ns;
             unsigned long long now = msr_now_ns();
