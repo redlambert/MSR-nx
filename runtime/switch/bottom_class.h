@@ -27,6 +27,7 @@ typedef struct {
     int page;              // BC_PAGE_*, for BC_MENU
     int title_menu;        // BC_MENU on black (the title's menus), not the pause menu
     int x0, y0, x1, y1;    // BC_PROMPT: the box around its text (x1, y1 exclusive), rows from the top
+    int peak;              // BC_PROMPT: the text's brightest pixel, 0 to 255 (the title's prompt pulses)
 } BcResult;
 
 // pic: the bottom screen as main_nx.c keeps it, 320x240 RGBA words (red in the low byte), rows

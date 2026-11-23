@@ -122,17 +122,21 @@ static float dark_fraction(int threshold) {
 }
 
 // The box around the pixels brighter than threshold (a prompt's text); x1 <= x0 when there are none.
-static void bright_box(int threshold, int* x0, int* y0, int* x1, int* y1) {
-    int bx0 = W, by0 = H, bx1 = 0, by1 = 0;
+static void bright_box(int threshold, int* x0, int* y0, int* x1, int* y1, int* peak) {
+    int bx0 = W, by0 = H, bx1 = 0, by1 = 0, pk = 0;
     for (int y = 0; y < H; y++)
-        for (int x = 0; x < W; x++)
-            if (brightness(x, y) > threshold) {
+        for (int x = 0; x < W; x++) {
+            int v = brightness(x, y);
+            if (v > pk) pk = v;
+            if (v > threshold) {
                 if (x < bx0) bx0 = x;
                 if (y < by0) by0 = y;
                 if (x + 1 > bx1) bx1 = x + 1;
                 if (y + 1 > by1) by1 = y + 1;
             }
+        }
     if (bx1 <= bx0) bx0 = by0 = bx1 = by1 = 0;
+    *peak = pk;
     *x0 = bx0;
     *y0 = by0;
     *x1 = bx1;
@@ -158,6 +162,7 @@ void bc_classify(const uint32_t* pic, BcResult* out) {
     out->page = BC_PAGE_OTHER;
     out->title_menu = 0;
     out->x0 = out->y0 = out->x1 = out->y1 = 0;
+    out->peak = 0;
     // Gameplay HUD: rules under the energy bar and above the counters. Bright when playing, dimmed
     // by the game during cutscenes, when it stays hidden. A menu's title rule (y ~24, 100 px or
     // more; the HUD has 23 at most there) rules it out: a well explored pause map draws its outlines
@@ -206,7 +211,7 @@ void bc_classify(const uint32_t* pic, BcResult* out) {
         out->bottom = BC_PROMPT;
         // msr2ds compositor.cpp: the text's box, made even about the screen's middle
         int x0, y0, x1, y1;
-        bright_box(140, &x0, &y0, &x1, &y1);
+        bright_box(140, &x0, &y0, &x1, &y1, &out->peak);
         if (x1 > x0) {
             int m = x0 < W - x1 ? x0 : W - x1;
             out->x0 = m;

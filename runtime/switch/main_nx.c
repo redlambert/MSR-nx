@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.7.2 test (gallery view, steady subtitles)"
+#define MSR_VERSION "0.7.3 test (subtitles as msr2ds draws them)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -181,7 +181,7 @@ static void display_init(void) {
         dkShaderInitialize(&g_hud_vsh, &sm2);
         dkShaderMakerDefaults(&sm2, g_hud_code, vsz);
         dkShaderInitialize(&g_hud_fsh, &sm2);
-        // 0x000 uniforms (32 bytes), 0x100 image descriptor, 0x200 sampler descriptor
+        // 0x000 uniforms (48 bytes), 0x100 image descriptor, 0x200 sampler descriptors (nearest, linear)
         dkMemBlockMakerDefaults(&mm, g_dev, 0x1000);
         mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
         g_hud_data = dkMemBlockCreate(&mm);
@@ -192,6 +192,10 @@ static void display_init(void) {
         DkSampler smp;
         dkSamplerDefaults(&smp);   // nearest: the readouts stay as sharp as the game drew them
         dkSamplerDescriptorInitialize((DkSamplerDescriptor*)(d + 0x200), &smp);
+        dkSamplerDefaults(&smp);   // linear: the subtitles at 1.5x
+        smp.minFilter = DkFilter_Linear;
+        smp.magFilter = DkFilter_Linear;
+        dkSamplerDescriptorInitialize((DkSamplerDescriptor*)(d + 0x200 + sizeof(DkSamplerDescriptor)), &smp);
     }
 
     dkMemBlockMakerDefaults(&mm, g_dev, 0x10000);
@@ -218,8 +222,20 @@ static void display_init(void) {
 // prologue's lines were never shown.
 enum { SS_TOP, SS_HUD, SS_MENU, SS_GALLERY, SS_TEXT };
 static int g_ss_view = SS_TOP;
-static int g_ss_box[4];                        // SS_TEXT: the bottom screen's text (x0, y0, x1, y1, rows from the top)
-static int g_ss_text_dst[4];                   // SS_TEXT: where it is drawn on the Switch's screen (x, y, w, h)
+// SS_TEXT, the subtitles, after msr2ds's compositor: the text keyed out of the bottom screen (its
+// backdrop fully see-through) over a dark card. The card follows the text's box, but grows at once
+// and shrinks only after a second without growing, and what is drawn eases to it, so lines coming
+// and the cursor blinking after them do not move or resize anything. The placement is fixed for a
+// size: a short prompt (the title's) at 2x with the bottom screen's middle at 80% of the screen's
+// height, below the logo; taller text (the prologue's) at 1.5x and lower, held for 5 s after the
+// text was last tall.
+static float g_ss_card[4];                     // the card's text area, bottom-screen pixels (x0, y0, x1, y1)
+static float g_ss_shown[4];                    // ...as drawn, easing to it
+static int g_ss_card_set;
+static unsigned long long g_ss_card_ns, g_ss_tall_ns;
+static float g_ss_gain = 1.0f;                 // the text's brightness gain (the title's prompt pulses)
+static int g_ss_text_dst[4];                   // where the text is drawn on the Switch's screen (x, y, w, h)
+static float g_ss_text_src[4];                 // ...and the bottom-screen area it shows (x, y, w, h)
 static unsigned long long g_start_pressed_ns;  // the 3DS Start button's last press (input, below)
 static const char* const k_ss_names[] = {
     "top screen only",
@@ -238,13 +254,33 @@ static void single_screen_update(const u32* pic) {
     if (r.bottom == BC_HUD) want = SS_HUD;
     else if (r.bottom == BC_PROMPT) want = SS_TEXT;
     else if (r.bottom == BC_MENU) want = r.page == BC_PAGE_GALLERY ? SS_GALLERY : SS_MENU;
-    if (want == SS_TEXT && r.x1 > r.x0) {   // the text box follows the lines as they come
-        g_ss_box[0] = r.x0;
-        g_ss_box[1] = r.y0;
-        g_ss_box[2] = r.x1;
-        g_ss_box[3] = r.y1;
-    }
     unsigned long long now = msr_now_ns();
+    if (want == SS_TEXT && r.x1 > r.x0) {
+        float t[4] = {(float)r.x0, (float)r.y0, (float)r.x1, (float)r.y1};
+        float* c = g_ss_card;
+        int beyond_card = t[0] < c[0] - 1 || t[1] < c[1] - 1 || t[2] > c[2] + 1 || t[3] > c[3] + 1;
+        int card_beyond = c[0] < t[0] - 1 || c[1] < t[1] - 1 || c[2] > t[2] + 1 || c[3] > t[3] + 1;
+        if (!g_ss_card_set || t[1] < c[1] - 4 || t[1] > c[1] + 4) {   // new text
+            memcpy(c, t, sizeof t);
+            if (!g_ss_card_set) memcpy(g_ss_shown, t, sizeof t);
+            g_ss_card_set = 1;
+            g_ss_card_ns = now;
+        } else if (beyond_card) {   // grows at once
+            if (t[0] < c[0]) c[0] = t[0];
+            if (t[1] < c[1]) c[1] = t[1];
+            if (t[2] > c[2]) c[2] = t[2];
+            if (t[3] > c[3]) c[3] = t[3];
+            g_ss_card_ns = now;
+        } else if (!card_beyond || now - g_ss_card_ns > 1000000000ull) {   // shrinks after a second
+            memcpy(c, t, sizeof t);
+            g_ss_card_ns = now;
+        }
+        if (c[3] - c[1] > 26.0f) g_ss_tall_ns = now;
+        float peak = r.peak > 40 ? r.peak / 255.0f : 40 / 255.0f;
+        g_ss_gain = 0.88f / peak;
+        if (g_ss_gain < 1.0f) g_ss_gain = 1.0f;
+        if (g_ss_gain > 12.0f) g_ss_gain = 12.0f;
+    }
     static int cand = -1, cand_n, in_play, menu_asked;
     static unsigned long long cand_since, hud_seen;
     if (want == SS_GALLERY && in_play) want = SS_MENU;   // the gallery is a title screen: in play, a misread
@@ -276,6 +312,7 @@ static void single_screen_update(const u32* pic) {
         else if (now - cand_since < (now - hud_seen >= 1000000000ull ? 300000000ull : 1500000000ull)) held = 0;
     }
     if (!held) return;
+    if (want != SS_TEXT) g_ss_card_set = 0;
     g_ss_view = want;
     g_map_view = want == SS_MENU;
     g_gallery_view = want == SS_GALLERY;
@@ -431,45 +468,75 @@ static void present(void) {
         dkCmdBufBlitImage(g_cmd, &hv, &hs, &fbv, &td, DkBlitFlag_FilterLinear, 0);
     } else if (tr.w) dkCmdBufBlitImage(g_cmd, &sv[0], &ts, &fbv, &td, DkBlitFlag_FilterLinear, 0);
     if (br.w) dkCmdBufBlitImage(g_cmd, &sv[1], &bs, &fbv, &bd, DkBlitFlag_FilterLinear, 0);
-    if (g_set.layout == LAYOUT_TOP_ONLY && (g_ss_view == SS_HUD || (g_ss_view == SS_TEXT && g_ss_box[2] > g_ss_box[0]))) {
+    if (g_set.layout == LAYOUT_TOP_ONLY && (g_ss_view == SS_HUD || (g_ss_view == SS_TEXT && g_ss_card_set))) {
         // single-screen mode: parts of the bottom screen drawn over the top one. With the HUD, its
         // readouts cut out and drawn at 2x (energy, missiles, Aeion gauge and the ability cross; the
         // selected ability; the Metroid DNA and Metroids left); with text on the bare backdrop (the
-        // prologue's lines, the title's prompt), the text as subtitles at the bottom, at up to 2x.
-        // Bottom-screen coordinates, rows counted from the top; sw, sh the size drawn.
-        typedef struct { int sx, sy, w, h, dx, dy, sw, sh; } Piece;
+        // prologue's lines, the title's prompt), the subtitles (g_ss_card).
+        // Bottom-screen coordinates, rows counted from the top; sw, sh the size drawn; look how the
+        // fragment shader draws it (hud_fsh.glsl).
+        typedef struct { float sx, sy, w, h, dx, dy, sw, sh; float look[4]; } Piece;
         static const Piece k_hud[3] = {
-            {0, 0, 160, 60, 48, 8, 320, 120},                    // top left
-            {250, 8, 70, 70, 1240 - 8 - 140, 8, 140, 140},       // top right: the selected beam (its slot, below)
-            {60, 212, 185, 28, 48, 720 - 8 - 56, 370, 56},       // bottom left
+            {0, 0, 160, 60, 48, 8, 320, 120, {0, 0, 0, 0}},                    // top left
+            {250, 8, 70, 70, 1240 - 8 - 140, 8, 140, 140, {0, 0, 0, 0}},       // top right: the selected beam (its slot, below)
+            {60, 212, 185, 28, 48, 720 - 8 - 56, 370, 56, {0, 0, 0, 0}},       // bottom left
         };
         Piece pieces[3];
         int npieces = 0;
+        int linear = 0;   // the text at 1.5x is filtered; the readouts at 2x stay sharp
         if (g_ss_view == SS_HUD) {
             memcpy(pieces, k_hud, sizeof k_hud);
             int sl = selected_beam_slot();
-            pieces[1].sy = k_beam_y[sl < 0 ? 0 : sl];
+            pieces[1].sy = (float)k_beam_y[sl < 0 ? 0 : sl];
             npieces = 3;
         } else {
-            // One fixed placement for all text: the bottom screen at 2x, centred, its last row 8 px
-            // above the Switch screen's bottom; only the text's box of it is drawn. Fitting each box
-            // instead moved and resized the text as lines came and the cursor after them blinked
-            // (Alec's 0.7.1 video).
-            Piece t;
-            t.sx = g_ss_box[0];
-            t.sy = g_ss_box[1];
-            t.w = g_ss_box[2] - g_ss_box[0];
-            t.h = g_ss_box[3] - g_ss_box[1];
-            t.sw = 2 * t.w;
-            t.sh = 2 * t.h;
-            t.dx = (FB_W - 640) / 2 + 2 * t.sx;
-            t.dy = FB_H - 8 - 480 + 2 * t.sy;
-            g_ss_text_dst[0] = t.dx;
-            g_ss_text_dst[1] = t.dy;
-            g_ss_text_dst[2] = t.sw;
-            g_ss_text_dst[3] = t.sh;
-            pieces[0] = t;
-            npieces = 1;
+            static unsigned long long last_ns;
+            unsigned long long now = msr_now_ns();
+            float dt = last_ns && now > last_ns ? (float)((now - last_ns) / 1e9) : 0.0f;
+            last_ns = now;
+            float e = dt * 12.0f > 1.0f ? 1.0f : dt * 12.0f;
+            for (int k = 0; k < 4; k++) g_ss_shown[k] += (g_ss_card[k] - g_ss_shown[k]) * e;
+            int tall = g_ss_tall_ns && now - g_ss_tall_ns < 5000000000ull;
+            float sc = tall ? 1.5f : 2.0f;
+            float row = tall ? 126.0f : 120.0f;                                                // the row placed at y_at
+            float y_at = tall ? (FB_H * 0.95f - 90.0f * sc < FB_H * 0.8f ? FB_H * 0.95f - 90.0f * sc : FB_H * 0.8f) : FB_H * 0.8f;
+            const float pad_x = 12.0f, pad_y = 7.0f;
+            float a0 = g_ss_shown[0] - pad_x, b0 = g_ss_shown[1] - pad_y, a1 = g_ss_shown[2] + pad_x, b1 = g_ss_shown[3] + pad_y;
+            Piece card;
+            card.sx = a0;
+            card.sy = b0;
+            card.w = a1 - a0;
+            card.h = b1 - b0;
+            card.dx = FB_W / 2 + (a0 - 160.0f) * sc;
+            card.dy = y_at + (b0 - row) * sc;
+            card.sw = card.w * sc;
+            card.sh = card.h * sc;
+            card.look[0] = 2.0f;
+            card.look[1] = 0.75f;
+            card.look[2] = 0.0f;
+            card.look[3] = 0.0f;
+            Piece text = card;
+            if (text.sx < 0) { text.dx -= text.sx * sc; text.w += text.sx; text.sx = 0; }
+            if (text.sy < 0) { text.dy -= text.sy * sc; text.h += text.sy; text.sy = 0; }
+            if (text.sx + text.w > 320) text.w = 320 - text.sx;
+            if (text.sy + text.h > 240) text.h = 240 - text.sy;
+            text.sw = text.w * sc;
+            text.sh = text.h * sc;
+            text.look[0] = 1.0f;
+            text.look[1] = 1.0f;
+            text.look[2] = g_ss_gain;
+            g_ss_text_dst[0] = (int)text.dx;
+            g_ss_text_dst[1] = (int)text.dy;
+            g_ss_text_dst[2] = (int)text.sw;
+            g_ss_text_dst[3] = (int)text.sh;
+            g_ss_text_src[0] = text.sx;
+            g_ss_text_src[1] = text.sy;
+            g_ss_text_src[2] = text.w;
+            g_ss_text_src[3] = text.h;
+            pieces[0] = card;
+            pieces[1] = text;
+            npieces = 2;
+            linear = tall;
         }
         // Drawn (not blitted) so the dark backgrounds can be see-through: hud_fsh.glsl.
         DkGpuAddr hd = dkMemBlockGetGpuAddr(g_hud_data);
@@ -496,19 +563,21 @@ static void present(void) {
         dss.depthWriteEnable = false;
         dkCmdBufBindDepthStencilState(g_cmd, &dss);
         dkCmdBufBindImageDescriptorSet(g_cmd, hd + 0x100, 1);
-        dkCmdBufBindSamplerDescriptorSet(g_cmd, hd + 0x200, 1);
-        DkResHandle th = dkMakeTextureHandle(0, 0);
+        dkCmdBufBindSamplerDescriptorSet(g_cmd, hd + 0x200, 2);
+        DkResHandle th = dkMakeTextureHandle(0, linear ? 1 : 0);
         dkCmdBufBindTextures(g_cmd, DkStage_Fragment, 0, &th, 1);
         DkShader const* hs[2] = {&g_hud_vsh, &g_hud_fsh};
         dkCmdBufBindShaders(g_cmd, DkStageFlag_GraphicsMask, hs, 2);
         dkCmdBufBarrier(g_cmd, DkBarrier_Full, DkInvalidateFlags_Image);   // the blits and uploads into the images are done
         for (int k = 0; k < npieces; k++) {
             const Piece* q = &pieces[k];
-            float rect[8] = {(float)q->dx, (float)(FB_H - q->dy - q->sh), (float)q->sw, (float)q->sh,
-                             (float)q->sx, (float)(240 - q->sy - q->h), (float)q->w, (float)q->h};
-            dkCmdBufPushConstants(g_cmd, hd, 32, 0, 32, rect);
-            DkBufExtents ub = {hd, 32};
+            float rect[12] = {q->dx, FB_H - q->dy - q->sh, q->sw, q->sh,
+                              q->sx, 240.0f - q->sy - q->h, q->w, q->h,
+                              q->look[0], q->look[1], q->look[2], q->look[3]};
+            dkCmdBufPushConstants(g_cmd, hd, 48, 0, 48, rect);
+            DkBufExtents ub = {hd, 48};
             dkCmdBufBindUniformBuffers(g_cmd, DkStage_Vertex, 0, &ub, 1);
+            dkCmdBufBindUniformBuffers(g_cmd, DkStage_Fragment, 0, &ub, 1);
             dkCmdBufDraw(g_cmd, DkPrimitive_TriangleStrip, 4, 1, 0, 0);
         }
         dkCmdBufBarrier(g_cmd, DkBarrier_Fragments, 0);   // before the blits that follow
@@ -755,8 +824,8 @@ static void input_poll(void) {
         int tx = (int)ts.touches[0].x - g_ss_text_dst[0], ty = (int)ts.touches[0].y - g_ss_text_dst[1];
         if (tx >= 0 && ty >= 0 && tx < g_ss_text_dst[2] && ty < g_ss_text_dst[3]) {
             msr_touch_down = 1;
-            msr_touch_x = (u16)(g_ss_box[0] + tx * (g_ss_box[2] - g_ss_box[0]) / g_ss_text_dst[2]);
-            msr_touch_y = (u16)(g_ss_box[1] + ty * (g_ss_box[3] - g_ss_box[1]) / g_ss_text_dst[3]);
+            msr_touch_x = (u16)(g_ss_text_src[0] + tx * g_ss_text_src[2] / g_ss_text_dst[2]);
+            msr_touch_y = (u16)(g_ss_text_src[1] + ty * g_ss_text_src[3] / g_ss_text_dst[3]);
         }
     }
     {   // both sticks pressed in: a picture of the Switch output now

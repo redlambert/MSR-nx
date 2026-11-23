@@ -1,5 +1,18 @@
 # Progress log (newest first)
 
+## 2026-11-22 (late): 0.7.3, the subtitles as msr2ds draws them
+
+- Alec's 0.7.2 videos: the fixed 2x placement put the title's "Press A to Start" over the logo, the prologue's text
+  covered much of its picture, and the text's dark surround still grew and shrank with the cursor's blink (the HUD
+  shader drew the box's dark pixels at 30%, and the box followed every picture).
+- Now after msr2ds compositor.cpp: the text keyed out of the bottom screen (hud_fsh.glsl look 1: nothing below 0.45
+  brightness, all above 0.65, after a gain for the title prompt's dim phases), over a dark card (look 2, 75%). The
+  card grows at once, shrinks only after a second without growing (msr2ds: 0.5 s; the cursor's blink is about that),
+  restarts when the text's top moves more than 4 rows (new text), and what is drawn eases to it (12 per second).
+  Placement fixed per size: short text at 2x with bottom-screen row 120 at 80% of the screen's height (below the
+  logo); text taller than 26 rows at 1.5x with row 126 at min(80%, 95% - 90 x 1.5) of it, held 5 s after it was last
+  tall; the 1.5x text sampled linearly. The uniforms grew to 48 bytes (a third vec4, look).
+
 ## 2026-11-22 (night): 0.7.2, gallery view and steady subtitles
 
 - Alec's 0.7.1 receipt and video: the prologue's lines now show, but the file select, gallery and other title menus

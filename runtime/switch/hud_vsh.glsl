@@ -5,6 +5,7 @@
 layout (std140, binding = 0) uniform Rects {
     vec4 dst;   // x, y, w, h in the 1280x720 output image
     vec4 src;   // x, y, w, h in the 320x240 bottom-screen image
+    vec4 look;  // how the fragment shader draws it (hud_fsh.glsl)
 };
 layout (location = 0) out vec2 v_uv;
 void main() {
