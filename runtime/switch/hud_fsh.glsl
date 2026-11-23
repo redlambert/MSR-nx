@@ -17,13 +17,13 @@ layout (binding = 0) uniform sampler2D bottom;
 layout (location = 0) in vec2 v_uv;
 layout (location = 0) out vec4 o;
 void main() {
-    if (look.x > 1.5) {
-        o = vec4(0.01, 0.035, 0.07, look.y);
-        return;
-    }
     vec3 c = texture(bottom, v_uv).rgb;
     if (look.x > 2.5) {
         o = vec4(min(c * look.z, vec3(1.0)), look.y);
+        return;
+    }
+    if (look.x > 1.5) {
+        o = vec4(0.01, 0.035, 0.07, look.y);
         return;
     }
     if (look.x > 0.5) {

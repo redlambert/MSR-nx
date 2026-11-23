@@ -2,9 +2,10 @@
 
 ## 2026-11-22 (late): 0.7.5, minimap top right, selected beam on change
 
-- Alec's 0.7.4 screenshot: the minimap's box shows but is empty (the map's dark backdrop only). Cause not known yet:
-  the receipt now says every 5 s where the marker came from, the window, and the brightest pixel in the window and in
-  the whole map area of the bottom screen.
+- Alec's 0.7.4 screenshot: the minimap's box shows but is empty. hud_fsh.glsl tested look.x > 1.5 (the subtitles'
+  card, a plain dark fill) before look.x > 2.5 (the minimap), so the minimap was drawn as a card. Fixed in 0.7.6 (the
+  minimap's test first). The minimap at 1.5x (180x120, filtered), as tall as the readouts beside it. The receipt also says every 5 s where the marker came from, the window, and the brightest
+  pixel in the window and in the map area.
 - Placement (Alec): the minimap in the top right (1000, 8), where the selected beam was. The selected beam, always
   shown, goes right of the energy and Aeion readout at its height (70x70 to 120x120, filtered: look[3] picks the
   linear sampler per piece). hud_fsh.glsl look 0 also takes look.y as a fade (unused for now).

@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.7.5 test (minimap top right, beam beside the energy)"
+#define MSR_VERSION "0.7.6 test (minimap drawn)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -542,7 +542,8 @@ static void present(void) {
             pieces[npieces++] = b;
             if (g_set.minimap) {
                 // The map around Samus, top right: 120x80 of the bottom screen's map (x 0-252, y 58-213,
-                // under the energy bar and above the counters) at 2x, eased after her marker (msr2ds).
+                // under the energy bar and above the counters) at 1.5x, as tall as the readouts (120), eased
+                // after her marker (msr2ds).
                 static float cx = 125.0f, cy = 135.0f;   // the map's middle, where the game keeps her marker
                 static unsigned long long last_ns, log_ns;
                 float dt = last_ns && now > last_ns ? (float)((now - last_ns) / 1e9) : 0.0f;
@@ -562,7 +563,7 @@ static void present(void) {
                 if (sx > 252.0f - 120.0f) sx = 252.0f - 120.0f;
                 if (sy < 58.0f) sy = 58.0f;
                 if (sy > 213.0f - 80.0f) sy = 213.0f - 80.0f;
-                Piece m = {sx, sy, 120, 80, 1240 - 240, 8, 240, 160, {3.0f, 0.85f, 1.15f, 0.0f}};
+                Piece m = {sx, sy, 120, 80, 1240 - 180, 8, 180, 120, {3.0f, 0.85f, 1.15f, 1.0f}};   // 1.5x, as tall as the readouts, filtered
                 pieces[npieces++] = m;
                 // what the minimap saw, every 5 s (0.7.4 drew an empty box): the marker, the window, and how
                 // bright the bottom screen is in it and in the whole map area
