@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.7.4 test (minimap)"
+#define MSR_VERSION "0.7.5 test (minimap top right, beam beside the energy)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -522,29 +522,35 @@ static void present(void) {
         // fragment shader draws it (hud_fsh.glsl).
         typedef struct { float sx, sy, w, h, dx, dy, sw, sh; float look[4]; } Piece;
         static const Piece k_hud[3] = {
-            {0, 0, 160, 60, 48, 8, 320, 120, {0, 0, 0, 0}},                    // top left
-            {250, 8, 70, 70, 1240 - 8 - 140, 8, 140, 140, {0, 0, 0, 0}},       // top right: the selected beam (its slot, below)
-            {60, 212, 185, 28, 48, 720 - 8 - 56, 370, 56, {0, 0, 0, 0}},       // bottom left
+            {0, 0, 160, 60, 48, 8, 320, 120, {0, 0, 0, 0}},                       // top left
+            {60, 212, 185, 28, 48, 720 - 8 - 56, 370, 56, {0, 0, 0, 0}},          // bottom left
+            {250, 8, 70, 70, 48 + 320 + 8, 8, 120, 120, {0, 0, 0, 1}},           // right of the top left one: the selected beam, as tall (filtered)
         };
         Piece pieces[4];
         int npieces = 0;
         int linear = 0;   // the text at 1.5x is filtered; the readouts at 2x stay sharp
         if (g_ss_view == SS_HUD) {
-            memcpy(pieces, k_hud, sizeof k_hud);
+            unsigned long long now = msr_now_ns();
+            pieces[0] = k_hud[0];
+            pieces[1] = k_hud[1];
+            npieces = 2;
+            // The selected beam, always shown, as tall as the energy and Aeion readout and right of it
+            // (Alec: the top right is the minimap's place)
+            Piece b = k_hud[2];
             int sl = selected_beam_slot();
-            pieces[1].sy = (float)k_beam_y[sl < 0 ? 0 : sl];
-            npieces = 3;
+            b.sy = (float)k_beam_y[sl < 0 ? 0 : sl];
+            pieces[npieces++] = b;
             if (g_set.minimap) {
-                // the map around Samus: 120x80 of the bottom screen's map (x 0-252, y 58-213, under the energy
-                // bar and above the counters), at 2x under the beam slot, eased after her marker (msr2ds)
+                // The map around Samus, top right: 120x80 of the bottom screen's map (x 0-252, y 58-213,
+                // under the energy bar and above the counters) at 2x, eased after her marker (msr2ds).
                 static float cx = 125.0f, cy = 135.0f;   // the map's middle, where the game keeps her marker
-                static unsigned long long last_ns;
-                unsigned long long now = msr_now_ns();
+                static unsigned long long last_ns, log_ns;
                 float dt = last_ns && now > last_ns ? (float)((now - last_ns) / 1e9) : 0.0f;
                 last_ns = now;
                 float mx = 125.0f, my = 135.0f;
                 int focus = 0;
-                if (!map_marker(&mx, &my, &focus) || focus) {
+                int found = map_marker(&mx, &my, &focus);
+                if (!found || focus) {
                     mx = 125.0f;
                     my = 135.0f;
                 }
@@ -556,9 +562,29 @@ static void present(void) {
                 if (sx > 252.0f - 120.0f) sx = 252.0f - 120.0f;
                 if (sy < 58.0f) sy = 58.0f;
                 if (sy > 213.0f - 80.0f) sy = 213.0f - 80.0f;
-                Piece m = {sx, sy, 120, 80, 1240 - 240, 156, 240, 160, {3.0f, 0.85f, 1.15f, 0.0f}};
-                pieces[3] = m;
-                npieces = 4;
+                Piece m = {sx, sy, 120, 80, 1240 - 240, 8, 240, 160, {3.0f, 0.85f, 1.15f, 0.0f}};
+                pieces[npieces++] = m;
+                // what the minimap saw, every 5 s (0.7.4 drew an empty box): the marker, the window, and how
+                // bright the bottom screen is in it and in the whole map area
+                if (!log_ns || now - log_ns > 5000000000ull) {
+                    log_ns = now;
+                    const u32* b = g_upload + 400 * 240;
+                    int peak_win = 0, peak_map = 0;
+                    for (int y = 58; y < 213; y++)
+                        for (int x = 0; x < 252; x++) {
+                            u32 c = b[(239 - y) * 320 + x];
+                            int r = c & 0xFF, g = (c >> 8) & 0xFF, bl = (c >> 16) & 0xFF;
+                            int v = r > g ? r : g;
+                            if (bl > v) v = bl;
+                            if (v > peak_map) peak_map = v;
+                            if (x >= (int)sx && x < (int)sx + 120 && y >= (int)sy && y < (int)sy + 80 && v > peak_win) peak_win = v;
+                        }
+                    static unsigned logged;
+                    if (logged++ < 60)
+                        msr_receipt("minimap: marker %s (%.0f, %.0f)%s, window from (%.0f, %.0f); brightest in it %d, in the map area %d",
+                                    found ? "from the game" : "not found", mx, my, focus ? ", the game's map elsewhere" : "", sx, sy,
+                                    peak_win, peak_map);
+                }
             }
         } else {
             static unsigned long long last_ns;
@@ -637,11 +663,18 @@ static void present(void) {
         dkCmdBufBindSamplerDescriptorSet(g_cmd, hd + 0x200, 2);
         DkResHandle th = dkMakeTextureHandle(0, linear ? 1 : 0);
         dkCmdBufBindTextures(g_cmd, DkStage_Fragment, 0, &th, 1);
+        int bound_linear = linear;
         DkShader const* hs[2] = {&g_hud_vsh, &g_hud_fsh};
         dkCmdBufBindShaders(g_cmd, DkStageFlag_GraphicsMask, hs, 2);
         dkCmdBufBarrier(g_cmd, DkBarrier_Full, DkInvalidateFlags_Image);   // the blits and uploads into the images are done
         for (int k = 0; k < npieces; k++) {
             const Piece* q = &pieces[k];
+            int want_linear = linear || q->look[3] > 0.5f;   // look[3]: filtered (a readout at an odd scale)
+            if (want_linear != bound_linear) {
+                DkResHandle h = dkMakeTextureHandle(0, want_linear ? 1 : 0);
+                dkCmdBufBindTextures(g_cmd, DkStage_Fragment, 0, &h, 1);
+                bound_linear = want_linear;
+            }
             float rect[12] = {q->dx, FB_H - q->dy - q->sh, q->sw, q->sh,
                               q->sx, 240.0f - q->sy - q->h, q->w, q->h,
                               q->look[0], q->look[1], q->look[2], q->look[3]};

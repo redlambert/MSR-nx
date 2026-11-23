@@ -1,7 +1,7 @@
 // MSR-nx: single-screen mode, part of the bottom screen over the top screen (main_nx.c present).
 // look.x picks how:
 //  0: a HUD readout. Its dark background is see-through; lines, icons and text get more opaque the
-//     brighter they are, and bright text is fully opaque.
+//     brighter they are, and bright text is fully opaque. look.y, when above 0, fades it.
 //  1: text (the prologue's lines, the title's prompt), keyed as msr2ds's compositor keys it: below
 //     0.45 brightness nothing, above 0.65 all, after look.z's gain (the title's prompt pulses, and its
 //     dim phases would vanish); look.y the opacity.
@@ -34,5 +34,5 @@ void main() {
     }
     float m = max(c.r, max(c.g, c.b));
     float a = clamp((m - 0.25) / 0.45, 0.0, 1.0);
-    o = vec4(c, 0.3 + 0.7 * a);
+    o = vec4(c, (0.3 + 0.7 * a) * (look.y > 0.0 ? look.y : 1.0));   // look.y: a fade (the selected beam's)
 }
