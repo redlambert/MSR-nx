@@ -567,7 +567,16 @@ static void present(void) {
                 static unsigned long long period_ns;
                 const u32* bot = g_upload + 400 * 240;
                 int row0 = 239 - (sy + 69);   // the slot's first row in the picture (rows stored bottom to top)
-                int restart = sl != hold_slot;
+                // Greyed out (Morph Ball): the lit slot's brightest pixel drops under 240, where lit it
+                // always reaches 255, pulse or not (msr2ds bottom_classifier.h ReadBeamSlots). Then the
+                // slot is shown as it is, so the grey comes at once.
+                u32 peak = 0;
+                for (int j = 0; j < 70; j += 2)
+                    for (int i = 0; i < 70; i += 2) {
+                        u32 v = px_bright(bot[(row0 + j) * 320 + 250 + i]);
+                        if (v > peak) peak = v;
+                    }
+                int restart = sl != hold_slot || peak < 240;
                 int next_period = !restart && now - period_ns > 1500000000ull;
                 if (restart || next_period) period_ns = now;
                 hold_slot = sl;
