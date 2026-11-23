@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.7.9 test (GPU speed-ups)"
+#define MSR_VERSION "0.8.0 test (GPU cost per target, GPU test row)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -1126,6 +1126,8 @@ int main(int argc, char** argv) {
                 unsigned gd, gv, go;
                 dkr_gpu_times(&gd, &gv, &go);
                 msr_receipt("  GPU time: draws %u ms, VRAM work %u ms, elsewhere or idle %u ms", gd, gv, go);
+                void dkr_target_report(void);
+                dkr_target_report();
                 {
                     void dkr_latch_stats(unsigned* waits, unsigned* ms);
                     unsigned lw, lm;
@@ -1151,18 +1153,7 @@ int main(int argc, char** argv) {
                 msr_receipt("  GPU barriers: %u recorded of %u asked (GPU sync %s)", bd, ba,
                             g_set.sync == 0 ? "Safe" : g_set.sync == 1 ? "Fewer waits" : "Lean");
                 unsigned dkr_ez_stats(void);
-                void dkr_ez_missing_stats(unsigned* missing, unsigned* asked);
-                unsigned ezd = dkr_ez_stats(), ezm, eza;
-                dkr_ez_missing_stats(&ezm, &eza);
-                msr_receipt("  early depth: %u draws; %u more could have, but had only the plain shader (%u early-depth compiles asked)",
-                            ezd, ezm, eza);
-                void dkr_trim_stats(int* level, unsigned* deferred, unsigned* late, unsigned* skipped, unsigned* img_waits);
-                int tl;
-                unsigned fd, fl, ws, wi;
-                dkr_trim_stats(&tl, &fd, &fl, &ws, &wi);
-                static const char* tn[4] = {"off", "fills", "fills, waits", "fills, waits, early depth"};
-                msr_receipt("  speed-ups %s: %u fills left to the clear (%u of them run later), %u barriers left out after VRAM work (%u waits for an image instead)",
-                            tn[tl & 3], fd, fl, ws, wi);
+                msr_receipt("  early depth: %u draws", dkr_ez_stats());
                 void dkr_vram_stats(unsigned* out);
                 unsigned vo[16];   // K_COUNT (13) entries; was 9, written past its end
                 dkr_vram_stats(vo);

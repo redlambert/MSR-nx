@@ -21,7 +21,7 @@ typedef struct {
     int fps60;         // frame rate: 0 the 3DS's 30, 1 60 (os/sched.c msr_frame_limit_ms)
     int copies;        // GX copies and transfers: 0 from render target images, 1 through VRAM (dk_pica.c img_source)
     int newest;        // Show newest frame: 1 the GPU's frame queue limit (dk_pica.c dkr_frame_limit), 0 off
-    int trim;          // Speed-ups (test): 0 off, 1 fills, 2 also fewer waits, 3 also early depth (dk_pica.c g_trim)
+    int gtest;         // GPU test (not saved): bit 0 plain pixels, bit 1 effect layers at 1x (dk_pica.c g_test)
     int minimap;       // single-screen mode: 1 the bottom screen's map around Samus drawn in the top right during play
     int extras;        // MSR_EXTRA_* bits (os/extras.h): galleries, every difficulty, Fusion suit
     u64 bind[NBIND];   // Switch button (HidNpadButton_*) for A, B, X, Y, L, R, Start, Select, Next beam

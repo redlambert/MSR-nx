@@ -47,7 +47,7 @@ static DkMemBlock g_rb;
 static u8* g_rb_cpu;
 static DkGpuAddr g_rb_gpu;
 static DkCmdBuf g_cmd;
-static DkShader g_vsh, g_fsh, g_test_vsh;
+static DkShader g_vsh, g_fsh, g_test_vsh, g_plain_fsh;
 static u8* g_dyn_cpu;
 static DkGpuAddr g_dyn_gpu;
 static u32 g_dyn_pos, g_img_pos, g_tex_pos = SURF_REGION;
@@ -90,8 +90,7 @@ typedef struct {
     u32 clear_value;
     int scaled;              // the resolution scaler's size: the image is sw x sh, not w x h
     u32 sw, sh;
-    int vfill_pending;       // Speed-ups 1+: a whole-surface fill not yet done on the GPU's VRAM (vfill_run)
-    u32 vfill_q[4];
+    u32 draws, lit_draws;    // this report period (dkr_target_report)
     DkImage img;
 } Surf;
 
@@ -102,6 +101,25 @@ typedef struct {
 static int g_scale = 2;
 static volatile int g_scale_req = 2;
 void dkr_set_scale(int halves) { if (halves >= 2 && halves <= 4) g_scale_req = halves; }
+
+// GPU test (port menu, for measuring; not saved): bit 0 plain pixels (every draw colored by one
+// small shader: its first texture times its vertex color, no lighting, no combiners, no alpha
+// test), bit 1 effect layers at 1x (only the 240 x 400 targets the game puts on the top screen are
+// drawn at the larger size; the others, and their depth buffers, at the 3DS's own size).
+static volatile int g_test_req;
+static int g_test;
+#define SHOWN_N 4
+static u32 g_shown_addr[SHOWN_N];   // targets seen going to the top screen (hires_capture)
+static int g_shown_n, g_shown_changed;
+void dkr_set_gpu_test(int bits) {
+    g_test_req = bits & 3;
+    static const char* names[4] = {"Normal", "Plain pixels", "Effect layers at 1x", "Plain pixels and effect layers at 1x"};
+    msr_receipt("gpu: GPU test set to %s", names[bits & 3]);
+}
+static int is_shown(u32 addr) {
+    for (int k = 0; k < g_shown_n; k++) if (g_shown_addr[k] == addr) return 1;
+    return 0;
+}
 static int scale_fits(u32 w, u32 h) { return g_scale != 2 && w == 240 && h == 400; }
 
 #define MAX_SURF 32
@@ -220,18 +238,6 @@ static u32 vram_version(u32 a, u32 n) {
 static int g_sync_mode, g_clean;
 static unsigned g_barriers_asked, g_barriers_done;
 #define GPU_WORK() (g_clean = 0)
-
-// Speed-ups (port menu, test): 0 off (0.7.8), 1 fills, 2 also fewer waits after VRAM work,
-// 3 also early-depth shaders compiled when missing. Each level keeps the ones before it.
-static int g_trim = 3;
-static unsigned g_fills_deferred, g_fills_run_late, g_waits_skipped, g_waits_for_images;
-
-// Speed-ups 2+: images that a kernel without its own closing barrier is still reading. Anything
-// that writes one of them (a draw into it, an upload) waits for that kernel first (img_wait).
-#define PEND_IMG 8
-static const DkImage* g_pend_img[PEND_IMG];
-static unsigned g_pend_n;
-
 static void gpu_barrier(void) {
     g_barriers_asked++;
     if (g_sync_mode >= 1 && g_clean) return;
@@ -239,22 +245,6 @@ static void gpu_barrier(void) {
     u32 inv = DkInvalidateFlags_Image | DkInvalidateFlags_Shader | (g_sync_mode >= 2 ? 0 : DkInvalidateFlags_L2Cache);
     dkCmdBufBarrier(g_cmd, DkBarrier_Full, inv);
     g_clean = 1;
-    g_pend_n = 0;
-}
-static void img_wait(const DkImage* img) {
-    for (unsigned k = 0; k < g_pend_n; k++)
-        if (g_pend_img[k] == img) { g_waits_for_images++; gpu_barrier(); return; }
-}
-void dkr_set_trim(int level) {
-    static const char* names[4] = {"Off", "Fills", "Fills, waits", "Fills, waits, early depth"};
-    if (level < 0 || level > 3) level = 3;
-    g_trim = level;
-    g_clean = 0;   // the next barrier is always recorded
-    msr_receipt("gpu: speed-ups set to %s", names[level]);
-}
-void dkr_trim_stats(int* level, unsigned* deferred, unsigned* late, unsigned* skipped, unsigned* img_waits) {
-    *level = g_trim; *deferred = g_fills_deferred; *late = g_fills_run_late; *skipped = g_waits_skipped; *img_waits = g_waits_for_images;
-    g_fills_deferred = g_fills_run_late = g_waits_skipped = g_waits_for_images = 0;
 }
 void dkr_set_sync_mode(int m) {
     static const char* names[3] = {"Safe", "Fewer waits", "Lean"};
@@ -274,7 +264,7 @@ void dkr_barrier_stats(unsigned* asked, unsigned* done) {
 // one mark to the next goes to the kind of work that ended at it; time up to a list's first mark
 // is the GPU doing something else (the presenter's lists) or nothing. Read back when the GPU has
 // written the marks, reported every 5 seconds.
-enum { TS_NONE, TS_DRAW, TS_VRAM, TS_START, TS_KINDS };
+enum { TS_NONE, TS_DRAW, TS_VRAM, TS_START, TS_SURF0, TS_KINDS = TS_SURF0 + MAX_SURF };   // draws: by target (TS_SURF0 + slot)
 #define TS_RING 4096
 static DkMemBlock g_ts_mem;
 static u8 g_ts_kind[TS_RING];
@@ -308,12 +298,28 @@ static void ts_collect(void) {
 }
 // GPU milliseconds (per 5 seconds, or whatever the caller's period) in draws, VRAM work, and
 // elsewhere (the presenter's lists, idle), then zeroed.
+static u64 g_surf_ns[MAX_SURF];   // the last period's draw time per target slot (dkr_target_report)
 void dkr_gpu_times(unsigned* draw_ms, unsigned* vram_ms, unsigned* other_ms) {
     ts_collect();
+    for (int k = 0; k < MAX_SURF; k++) { g_surf_ns[k] = g_ts_ns[TS_SURF0 + k]; g_ts_ns[TS_DRAW] += g_ts_ns[TS_SURF0 + k]; }
     *draw_ms = (unsigned)(g_ts_ns[TS_DRAW] / 1000000);
     *vram_ms = (unsigned)(g_ts_ns[TS_VRAM] / 1000000);
     *other_ms = (unsigned)((g_ts_ns[TS_START] + g_ts_ns[TS_NONE]) / 1000000);
     memset(g_ts_ns, 0, sizeof g_ts_ns);
+}
+
+// One receipt line per render target drawn to in the last period: its GPU draw time, its draws
+// (and how many used fragment lighting), its size, and whether it went to the top screen. The time
+// is between timestamps at target changes, so a target's share is close but not exact.
+void dkr_target_report(void) {
+    for (int k = 0; k < MAX_SURF; k++) {
+        Surf* s = &g_surf[k];
+        unsigned ms = (unsigned)(g_surf_ns[k] / 1000000);
+        if (!s->used || s->depth || (!s->draws && !ms)) { s->draws = s->lit_draws = 0; continue; }
+        msr_receipt("  target %08X %ux%u%s%s: %u ms, %u draws (%u lit)", s->addr, s->w, s->h,
+                    s->scaled ? " at the larger size" : "", is_shown(s->addr) ? ", the top screen" : "", ms, s->draws, s->lit_draws);
+        s->draws = s->lit_draws = 0;
+    }
 }
 
 // Runs one of the vram_ops.inc kernels: q = four uvec4 parameters, n = invocations.
@@ -355,22 +361,12 @@ static void kernel(int k, const u32 q[16], u32 n, const DkImage* src, const DkIm
     dkCmdBufBindShaders(g_cmd, DkStageFlag_Compute, &sh, 1);
     dkCmdBufDispatchCompute(g_cmd, (n + 63) / 64, 1, 1);
     GPU_WORK();
-    // Speed-ups 2+: a kernel that writes only the GPU's VRAM buffer needs no barrier of its own.
-    // Draws never read that buffer; the next kernel, VRAM copy or upload opens with a barrier, the
-    // CPU reads it only after the queue is idle, and the screen output starts with its own. What
-    // it read from an image is remembered, so a draw or upload into that image waits for it.
-    if (g_trim >= 2 && !dst && k != K_DUMP && (!src || g_pend_n < PEND_IMG)) {
-        if (src) g_pend_img[g_pend_n++] = src;
-        g_waits_skipped++;
-        return;
-    }
     gpu_barrier();
 }
 
 // The CPU wrote guest VRAM [a, a + n): send it to the GPU's copy, in order with queued work.
 static void vram_upload(u32 a, u32 n) {
     ts_mark(TS_VRAM);
-    gpu_barrier();   // VRAM work before this is finished (free when nothing was recorded since the last)
     while (n) {
         u32 chunk = n > (4u << 20) ? (4u << 20) : n;
         u32 off = dyn_alloc((chunk + 3) & ~3u, 256);
@@ -390,7 +386,6 @@ static void surf_upload(Surf* s) {
     if (s->depth) { s->cpu_dirty = 0; return; }   // depth only ever comes from clears
     if (in_vram(s->addr, s->bytes)) { surf_load(s); return; }
     MSR_PERF_BEGIN(PERF_SURF_UPLOAD);
-    img_wait(&s->img);
     u32 off = dyn_alloc(s->w * s->h * 4, 256);
     u8* dst = g_dyn_cpu + off;
     const u8* src = g_mem + s->addr;
@@ -440,10 +435,7 @@ static void surf_readback(Surf* s) {
 // and the set starts over; they are loaded again from there when next drawn to. Depth buffers start
 // cleared (this game clears them every frame).
 static u32 g_img_floor;
-static void vfill_run(Surf* s);
 static void surf_reset_all(void) {
-    for (int k = 0; k < MAX_SURF; k++)
-        if (g_surf[k].used && g_surf[k].vfill_pending) vfill_run(&g_surf[k]);
     for (int k = 0; k < MAX_SURF; k++)
         if (g_surf[k].used && g_surf[k].gpu_dirty) surf_readback(&g_surf[k]);
     flush(1);
@@ -453,11 +445,14 @@ static void surf_reset_all(void) {
     msr_receipt("gpu: render target set started over (out of slots or memory)");
 }
 
-static Surf* surf_get(u32 addr, u32 w, u32 h, u32 fmt, int depth) {
+// want_scaled: -1 the usual rule, 0 or 1 a depth buffer that must match its color target's size
+// (Effect layers at 1x keeps a native and a larger depth buffer at one address apart).
+static Surf* surf_get(u32 addr, u32 w, u32 h, u32 fmt, int depth, int want_scaled) {
     Surf* free_s = 0;
     for (int k = 0; k < MAX_SURF; k++) {
         Surf* s = &g_surf[k];
-        if (s->used && s->addr == addr && s->w == w && s->h == h && s->depth == depth) { s->fmt = fmt; return s; }
+        if (s->used && s->addr == addr && s->w == w && s->h == h && s->depth == depth &&
+            (want_scaled < 0 || s->scaled == want_scaled)) { s->fmt = fmt; return s; }
         if (!s->used && !free_s) free_s = s;
     }
     if (!free_s) { surf_reset_all(); free_s = &g_surf[0]; }
@@ -469,6 +464,8 @@ static Surf* surf_get(u32 addr, u32 w, u32 h, u32 fmt, int depth) {
     lm.format = depth ? DkImageFormat_Z24S8 : DkImageFormat_RGBA8_Unorm;
     u32 bytes = depth ? w * h * (fmt == 0 ? 2 : fmt == 3 ? 4 : 3) : w * h * k_bpp[fmt];
     int scaled = scale_fits(w, h) && (depth || in_vram(addr, bytes));
+    if (want_scaled >= 0) scaled = scaled && want_scaled;
+    else if ((g_test & 2) && !depth && scaled && !is_shown(addr)) scaled = 0;   // GPU test: an effect layer at 1x
     u32 sw = scaled ? w * g_scale / 2 : w, sh = scaled ? h * g_scale / 2 : h;
     lm.dimensions[0] = sw;
     lm.dimensions[1] = sh;
@@ -506,25 +503,8 @@ static void surf_load(Surf* s) {
     s->cpu_dirty = 0;
 }
 
-// Speed-ups 1+: a fill of exactly one whole render target (the game clears its color and depth
-// targets every frame) becomes only the GPU clear at its next draw; its VRAM bytes are filled
-// only if something needs them before the target is drawn into (after a draw, the target's store
-// writes all of them anyway; a depth target is never stored, so its fill usually never runs).
-static void vfill_run(Surf* s) {
-    if (!s->vfill_pending) return;
-    s->vfill_pending = 0;
-    u32 q[16] = {s->vfill_q[0], s->vfill_q[1], s->vfill_q[2], s->vfill_q[3]};
-    kernel(K_FILL, q, (s->vfill_q[1] - s->vfill_q[0] + 3) / 4 + 1, 0, 0);
-    g_fills_run_late++;
-}
-static void vfill_range(u32 a, u32 n) {
-    for (int k = 0; k < MAX_SURF; k++)
-        if (g_surf[k].vfill_pending && overlaps(&g_surf[k], a, n)) vfill_run(&g_surf[k]);
-}
-
 // Everything the GPU drew in [a, a + n) reaches the GPU's VRAM (or guest memory, outside VRAM).
 static void store_range(u32 a, u32 n) {
-    vfill_range(a, n);
     for (int k = 0; k < MAX_SURF; k++)
         if (overlaps(&g_surf[k], a, n) && g_surf[k].gpu_dirty) surf_readback(&g_surf[k]);
 }
@@ -971,14 +951,20 @@ static int dk_draw(int indexed) {
         g_scale = g_scale_req;
         msr_receipt("gpu: 3D screen drawn at %d.%dx", g_scale / 2, g_scale & 1 ? 5 : 0);
     }
+    if (g_test_req != g_test || ((g_test & 2) && g_shown_changed)) {   // GPU test changed: targets start over at their sizes
+        int sizes = (g_test_req ^ g_test) & 2 || g_shown_changed;
+        g_test = g_test_req;
+        g_shown_changed = 0;
+        if (sizes) surf_reset_all();
+    }
 
     // ---- phase A: everything that may flush (surface and texture uploads, readbacks)
     Surf* cs = 0, *ds = 0;
     DkImage* tex[3] = {0, 0, 0};
     for (int attempt = 0; attempt < 2; attempt++) {
         unsigned f0 = g_flushes;
-        cs = surf_get(cva, W, H, (r[0x117] >> 16) & 7, 0);
-        ds = dva ? surf_get(dva, W, H, r[0x116] & 3, 1) : 0;
+        cs = surf_get(cva, W, H, (r[0x117] >> 16) & 7, 0, -1);
+        ds = dva ? surf_get(dva, W, H, r[0x116] & 3, 1, (g_test & 2) && cs ? cs->scaled : -1) : 0;   // Normal: as before 0.8.0
         if (!cs) return 1;
         if (ds && ds->scaled != cs->scaled) ds = 0;   // sizes must match (a depth buffer outside VRAM with a scaled target)
         if (cs->cpu_dirty) surf_upload(cs);
@@ -1065,8 +1051,9 @@ static int dk_draw(int indexed) {
     }
 
     // ---- phase C: commands
-    ts_mark(TS_DRAW);
-    if (g_pend_n) { img_wait(&cs->img); if (ds) img_wait(&ds->img); }
+    ts_mark(TS_SURF0 + (int)(cs - g_surf));
+    cs->draws++;
+    if ((r[0x8F] & 1) && !(r[0x1C6] & 1)) cs->lit_draws++;
     if (g_bound_color != cs || g_bound_depth != ds) {
         DkImageView cv, dv;
         dkImageViewDefaults(&cv, &cs->img);
@@ -1213,10 +1200,7 @@ static int dk_draw(int indexed) {
         GPU_WORK();
     } else dkCmdBufDraw(g_cmd, prim, n, 1, 0, 0);
     GPU_WORK();
-    if (r[0x113] && ((dm >> 8) & 0xF)) {
-        cs->gpu_dirty = 1;
-        cs->vfill_pending = 0;   // its store will write every byte the fill would have
-    }
+    if (r[0x113] && ((dm >> 8) & 0xF)) cs->gpu_dirty = 1;
     if (++g_draws_since_flush >= 256) flush(0);
     return 1;
 }
@@ -1244,7 +1228,6 @@ static void dk_invalidate(u32 a, u32 n) {
 }
 
 static void dk_fill(u32 start, u32 end, u32 value, u32 width) {
-    vfill_range(start, end - start);
     // a fill that covers a whole surface becomes a GPU clear; anything else is re-uploaded later
     for (int k = 0; k < MAX_SURF; k++) {
         Surf* s = &g_surf[k];
@@ -1274,7 +1257,6 @@ static Surf* img_source(u32 a, u32 n) {
     Surf* src = 0;
     for (int k = 0; k < MAX_SURF; k++) {
         Surf* s = &g_surf[k];
-        if (s->vfill_pending && overlaps(s, a, n)) return 0;   // the VRAM way runs that fill first
         if (!overlaps(s, a, n) || s->depth || !s->gpu_dirty) continue;   // depth is never stored; VRAM is current for the rest
         if (src) return 0;
         src = s;
@@ -1316,6 +1298,16 @@ static void dump_all(Surf* src, int slot);
 static void hires_capture(const u32* d, u32 outb) {
     // a whole 240 x 400 picture, not shrunk, tiled in and linear out (flags bits 1 and 5 clear)
     if (g_scale == 2 || ((d[4] >> 24) & 3) || (d[4] & 0x22) || d[2] != 0x019000F0 || d[3] != 0x019000F0) return;
+    if (!is_shown(d[0])) {   // a target the game puts on the top screen (kept at the larger size by Effect layers at 1x)
+        int seen = 0;
+        for (int k = 0; k < MAX_SURF; k++)
+            if (g_surf[k].used && !g_surf[k].depth && g_surf[k].addr == d[0] && g_surf[k].w == 240 && g_surf[k].h == 400) seen = 1;
+        if (seen) {
+            g_shown_addr[g_shown_n < SHOWN_N ? g_shown_n++ : SHOWN_N - 1] = d[0];
+            g_shown_changed = 1;
+            msr_receipt("gpu: target %08X goes to the top screen", d[0]);
+        }
+    }
     Surf* src = 0;
     for (int k = 0; k < MAX_SURF; k++) {
         Surf* s = &g_surf[k];
@@ -1412,15 +1404,6 @@ static int dk_gx(int op, const u32* d) {
     if (op == 2) {   // fill: start, end, value, width
         u32 start = d[0], end = d[1], value = d[2], width = d[3];
         if (!in_vram(start, end - start) || (start & 3) || (end & 3)) return 0;
-        Surf* exact = 0;
-        int nover = 0;
-        for (int k = 0; k < MAX_SURF; k++) {
-            Surf* s = &g_surf[k];
-            if (!s->used || !overlaps(s, start, end - start)) continue;
-            nover++;
-            if (s->addr == start && s->addr + s->bytes == end) exact = s;
-        }
-        if (!(g_trim >= 1 && nover == 1 && exact)) vfill_range(start, end - start);   // older pending fills under it first
         for (int k = 0; k < MAX_SURF; k++) {
             Surf* s = &g_surf[k];
             if (!s->used || !overlaps(s, start, end - start)) continue;
@@ -1438,11 +1421,7 @@ static int dk_gx(int op, const u32* d) {
             }
         }
         u32 q[16] = {start - VRAM_BASE, end - VRAM_BASE, value, width};
-        if (g_trim >= 1 && nover == 1 && exact) {
-            exact->vfill_pending = 1;
-            memcpy(exact->vfill_q, q, sizeof exact->vfill_q);
-            g_fills_deferred++;
-        } else kernel(K_FILL, q, (end - start + 3) / 4 + 1, 0, 0);
+        kernel(K_FILL, q, (end - start + 3) / 4 + 1, 0, 0);
         vram_touch(start, end - start);
         return 1;
     }
@@ -1508,7 +1487,6 @@ static int dk_gx(int op, const u32* d) {
             store_range(src, n);
             vram_will_write(dst, n);
             ts_mark(TS_VRAM);
-            gpu_barrier();   // VRAM work before this is finished
             dkCmdBufCopyBuffer(g_cmd, g_vram_gpu + (src - VRAM_BASE), g_vram_gpu + (dst - VRAM_BASE), n);
             GPU_WORK();
             gpu_barrier();
@@ -1692,12 +1670,12 @@ static unsigned g_fs_hits, g_fs_misses;
 // stays inside 0..1. Null while the configuration is being compiled on the Switch (the draw waits
 // out those frames rather than run on the general shader).
 #define EZ_BIT (1ull << 63)
-static unsigned g_ez_draws, g_fs_waits, g_ez_missing, g_ez_asked;
+static unsigned g_ez_draws, g_fs_waits;
 static const DkShader* fs_select(int* ez) {
     static u64 last_key;
-    static int last_ez, last_missing;
+    static int last_ez;
     static const DkShader* last = 0;
-    static unsigned seen_version, seen_rt;
+    static unsigned seen_version;
     const u32* r = g_pica.reg;
     float scale = pica_f24(r[0x4D]), offset = pica_f24(r[0x4E]);
     float nearz = offset, farz = offset - scale;
@@ -1706,15 +1684,13 @@ static const DkShader* fs_select(int* ez) {
     u64 key = base ^ (want_ez ? EZ_BIT : 0);
     if (g_jobs_live) fs_compile_poll();
     if (seen_version != g_force_version) { seen_version = g_force_version; last = 0; }
-    if (last_missing && seen_rt != g_rt_version) last = 0;   // a compile finished: maybe the early-depth one it waited for
+    if (g_test & 1) { *ez = want_ez; last = 0; return &g_plain_fsh; }   // GPU test: plain pixels
     if (last && key == last_key) {
         if (last == &g_fsh) g_fs_misses++; else g_fs_hits++;
         *ez = last_ez;
         if (last_ez) g_ez_draws++;
-        if (last_missing) g_ez_missing++;
         return last;
     }
-    last_missing = 0;
     *ez = 0;
     if (g_force_fs_general) { g_fs_misses++; last_key = key; last_ez = 0; return last = &g_fsh; }
     const DkShader* sh;
@@ -1727,15 +1703,6 @@ static const DkShader* fs_select(int* ez) {
         g_fs_hits++;
         last_key = key; last_ez = got_ez; *ez = got_ez;
         if (got_ez) g_ez_draws++;
-        if (want_ez && !got_ez) {
-            // The draw could test depth early, but only the plain shader exists. Speed-ups 3: the
-            // early-depth one is compiled in the background (saved to the shader cache like the
-            // rest); the plain one draws meanwhile, so nothing waits.
-            g_ez_missing++;
-            last_missing = 1;
-            seen_rt = g_rt_version;
-            if (g_trim >= 3 && compile_request(key, 0, 1)) g_ez_asked++;
-        }
         return last = sh;
     }
     // missing: compile it here (the exact variant wanted); the general shader only if that failed
@@ -1752,7 +1719,6 @@ static const DkShader* fs_select(int* ez) {
 
 void dkr_fs_stats(unsigned* hits, unsigned* misses, unsigned* waits) { *hits = g_fs_hits; *misses = g_fs_misses; *waits = g_fs_waits; g_fs_hits = g_fs_misses = g_fs_waits = 0; }
 unsigned dkr_ez_stats(void) { unsigned n = g_ez_draws; g_ez_draws = 0; return n; }
-void dkr_ez_missing_stats(unsigned* missing, unsigned* asked) { *missing = g_ez_missing; *asked = g_ez_asked; g_ez_missing = g_ez_asked = 0; }
 
 // ---- shaders compiled on the Switch -------------------------------------------------------------
 // A configuration missing from the pack is turned into GLSL here exactly as the pack's tools do
@@ -2033,9 +1999,9 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     static const u32 ksize[K_COUNT] = {vram_fill_dksh_size, vram_copy_dksh_size, vram_transfer_dksh_size, vram_store_dksh_size,
                                        vram_load_dksh_size, vram_texdecode_dksh_size, vram_screen_dksh_size, vram_transfer_img_dksh_size,
                                        vram_copy_img_dksh_size, vram_hires_dksh_size, vram_texup_dksh_size, vram_imgcopy_dksh_size, vram_dump_dksh_size};
-    u32 all = pica_vsh_dksh_size + pica_fsh_dksh_size + selftest_vsh_dksh_size;
+    u32 all = pica_vsh_dksh_size + pica_fsh_dksh_size + selftest_vsh_dksh_size + plain_fsh_dksh_size;
     for (int k = 0; k < K_COUNT; k++) all += ksize[k];
-    u32 code_size = ((all + (3 + K_COUNT) * DK_SHADER_CODE_ALIGNMENT + DK_SHADER_CODE_UNUSABLE_SIZE) + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
+    u32 code_size = ((all + (4 + K_COUNT) * DK_SHADER_CODE_ALIGNMENT + DK_SHADER_CODE_UNUSABLE_SIZE) + DK_MEMBLOCK_ALIGNMENT - 1) & ~(DK_MEMBLOCK_ALIGNMENT - 1);
     dkMemBlockMakerDefaults(&mm, dev, code_size);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
     g_code = dkMemBlockCreate(&mm);
@@ -2043,6 +2009,7 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     shader_load(&g_vsh, pica_vsh_dksh, pica_vsh_dksh_size, &co);
     shader_load(&g_fsh, pica_fsh_dksh, pica_fsh_dksh_size, &co);
     shader_load(&g_test_vsh, selftest_vsh_dksh, selftest_vsh_dksh_size, &co);
+    shader_load(&g_plain_fsh, plain_fsh_dksh, plain_fsh_dksh_size, &co);
     for (int k = 0; k < K_COUNT; k++) shader_load(&g_k[k], kcode[k], ksize[k], &co);
 
     // the GPU's copy of VRAM, empty like the guest's at boot. (dkr_init runs before the guest

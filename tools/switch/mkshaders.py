@@ -40,6 +40,7 @@ def main():
     jobs = [('pica_vsh', 'vert', os.path.join(R, 'gpu/dk/pica_vsh.glsl')),
             ('pica_fsh', 'frag', os.path.join(R, 'gpu/dk/pica_fsh.glsl')),
             ('selftest_vsh', 'vert', os.path.join(R, 'gpu/dk/test/selftest_vsh.glsl')),
+            ('plain_fsh', 'frag', os.path.join(R, 'gpu/dk/plain_fsh.glsl')),
             ('hud_vsh', 'vert', os.path.join(R, 'switch/hud_vsh.glsl')),
             ('hud_fsh', 'frag', os.path.join(R, 'switch/hud_fsh.glsl'))]
     inc = open(os.path.join(R, 'gpu/dk/vram_ops.inc')).read()

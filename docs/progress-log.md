@@ -1,5 +1,23 @@
 # Progress log (newest first)
 
+## 2026-11-23 (evening): 0.8.0 test, GPU cost per target and the GPU test row
+
+- Alec's 0.7.9 receipts: every Speed-ups step and GPU sync Lean ran the same, 37 to 40 at 2x and 60 fps. Fills
+  fitted about 2 of 600 fills per 5 s; about 2500 barriers per 5 s left out changed nothing; no draw lacked an
+  early-depth shader. Taken out again (dk_pica.c is 0.7.8's plus the changes below).
+- Resolution sweep (60 fps, 614 MHz): 1x a locked 60 (GPU idle about a quarter), 1.5x 48 to 53, 2x 37 to 40. GPU
+  time a picture about 13, 18.5 and 25.5 ms: about 9 ms whatever the size plus about 4.2 ms per 1x worth of pixels
+  (17 at 2x). 1.5x needs about 10% off to hold 60; 2x about half the pixel work.
+- Receipt: a line per render target drawn to in each period (draw time between timestamps at target changes,
+  draws and lit draws, size, larger size, whether it goes to the top screen). Timestamp kinds TS_SURF0 + slot.
+- Port menu "GPU test" (not saved): Plain pixels (plain_fsh.glsl for every draw: texture 0 times vertex color;
+  measures what pica_fsh.glsl costs), Effects at 1x (only 240 x 400 targets seen in a top screen display transfer,
+  hires_capture, stay at the larger size; the rest and their depth buffers native; a newly seen top screen target
+  starts the targets over), Both. surf_get takes the depth buffer's size from its color target in Effects at 1x
+  only; Normal is as before.
+- main_nx.c keeps 0.7.9's VRAM stats array fix. Compile-checked (clang, aarch64, libnx and deko3d headers);
+  plain_fsh.glsl is compiled by uam in the kit workflow; not run.
+
 ## 2026-11-23: 0.7.9 test, GPU speed-ups
 
 - Alec's 0.7.8 receipt (handheld, 2x, GPU 614, 60 fps, Show newest frame on): 34 to 48 pictures a second, about
