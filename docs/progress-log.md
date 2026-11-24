@@ -1,5 +1,38 @@
 # Progress log (newest first)
 
+## 2026-11-24 (later): 0.8.4 test, trace, A/B descriptors, start-over log
+
+- Built so one session answers 0.8.3's open cases (Alec): a partial gain, the limit moving to the CPU, a hitch
+  at each start-over, a crash, no change, one place only, noise after a switch.
+- GPU test "Trace 1 s": the capture's steps with no barriers: TimestampPipelineTop before a step (its front
+  end) and Timestamp after (it and all before it done). A step whose front end is not before the previous
+  finish waited for it; one more than 20 us after found the GPU idle. trace.csv (per step; per picture the
+  graphics thread's latch to latch time and its wait for the GPU) and a receipt summary: span, busy, idle gaps,
+  steps that waited by kind, steps right after a command list was sent (deko3d clears caches there), CPU time
+  and GPU wait a picture.
+- GPU test "A/B descriptors": shared set and a set per draw take 10 s turns for as long as it is on; the first
+  2 s of a turn are left out; a receipt line per turn (pictures a second, draws a picture, GPU wait a picture)
+  and the last pair side by side. Leaving it returns to the row's setting (g_desc_menu).
+- Descriptor start-over: a receipt line with the CPU's wait, and sdmc:/switch/msr/breadcrumb.txt written straight
+  to the card (the receipt is buffered) so a crash or freeze after one leaves a trace.
+
+## 2026-11-24: 0.8.3 test, one shared descriptor set
+
+- Alec's 0.8.2 receipt (2x, 614 MHz): 43 to 45 a second in gameplay (0.8.1: 37 to 40); copy_img 2.8 to 1.1 ms a
+  picture. Capture: draws 13.9 ms; without early depth 10.7 ms, all w-buffer (none out of range); 3.41 M pixels
+  shaded and 2.91 M passed depth a picture (about 9 screens at 2x). The main w-buffer shader 4694A0118A928360: 77
+  draws, 5.9 ms, 0.77 M pixels shaded, 0.49 M passed. The 240 x 320 draws (early depth): 39, 3.2 ms, 1.39 M pixels.
+- Every step timed alone costs at least about 10 to 30 us (a LUT upload 11 us, a draw that colors nothing 15 to
+  30 us whatever its vertex count), so the capture's sum (20.5 ms) holds 3 to 6 ms of its own overhead; normal
+  play still takes about 22.7 ms a picture. So in normal play steps are not overlapping: something between draws
+  makes the GPU wait.
+- The suspect: each draw (and kernel) bound its own image and sampler descriptor sets (SetTexHeaderPool and
+  SetTexSamplerPool, deko3d gpu_base.cpp), always at indices 0 to 3. Changing the pools under draws in flight with
+  the same indices only works if the GPU waits for them. Now one set (65536 image, 4096 sampler descriptors) is
+  bound once a command list; images go in the next free slots (started over only with the GPU idle, descriptor
+  cache cleared), samplers are kept by content. A set of its own only if there is no room (receipt line).
+- GPU test row: Old descriptors (a set per draw, as 0.8.2) for the comparison. Compile-checked; not run.
+
 ## 2026-11-23 (late night): 0.8.2 test, faster screen copies and a fuller capture
 
 - Alec's 0.8.1 capture (2x, 614 MHz, gameplay; each step timed by itself): 21.7 ms a picture. Draws 13.4 ms

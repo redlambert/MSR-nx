@@ -107,6 +107,8 @@ void dkr_set_scale(int halves) { if (halves >= 2 && halves <= 4) g_scale_req = h
 // test), bit 1 effect layers at 1x (only the 240 x 400 targets the game puts on the top screen are
 // drawn at the larger size; the others, and their depth buffers, at the 3DS's own size).
 static volatile int g_test_req;
+static volatile int g_desc_shared = 1;   // GPU test "Old descriptors": 0 (one descriptor set per draw, as before 0.8.3)
+static volatile int g_desc_menu = 1;     // what the GPU test row asked for (A/B descriptors goes back to it when it stops)
 static int g_test;
 #define SHOWN_N 4
 static u32 g_shown_addr[SHOWN_N];   // targets seen going to the top screen (hires_capture)
@@ -115,12 +117,16 @@ void dkr_capture_arm(void);
 // 0 Normal, 1 Plain pixels, 2 Capture 1 s (Normal drawing; a capture starts at the next picture).
 // (Effect layers at 1x, bit 1 of g_test, is no longer on the menu: 0.8.0 showed both larger targets
 // are the top screen's own two pictures.)
+void dkr_ab_set(int on);
+static volatile int g_cap_trace_req2;
 void dkr_set_gpu_test(int mode) {
-    static const char* names[3] = {"Normal", "Plain pixels", "Capture 1 s"};
-    if (mode < 0 || mode > 2) mode = 0;
+    static const char* names[6] = {"Normal", "Plain pixels", "Capture 1 s", "Old descriptors", "Trace 1 s", "A/B descriptors"};
+    if (mode < 0 || mode > 5) mode = 0;
     g_test_req = mode == 1 ? 1 : 0;
+    g_desc_shared = g_desc_menu = mode != 3;
     msr_receipt("gpu: GPU test set to %s", names[mode]);
-    if (mode == 2) dkr_capture_arm();
+    dkr_ab_set(mode == 5);
+    if (mode == 2 || mode == 4) { g_cap_trace_req2 = mode == 4; dkr_capture_arm(); }
 }
 static int is_shown(u32 addr) {
     for (int k = 0; k < g_shown_n; k++) if (g_shown_addr[k] == addr) return 1;
@@ -317,7 +323,12 @@ void dkr_gpu_times(unsigned* draw_ms, unsigned* vram_ms, unsigned* other_ms) {
 // One receipt line per render target drawn to in the last period: its GPU draw time, its draws
 // (and how many used fragment lighting), its size, and whether it went to the top screen. The time
 // is between timestamps at target changes, so a target's share is close but not exact.
+void dkr_desc_stats(unsigned* binds, unsigned* wraps, unsigned* fallbacks);
 void dkr_target_report(void) {
+    unsigned db, dw, df;
+    dkr_desc_stats(&db, &dw, &df);
+    msr_receipt("  descriptors: %s, shared set bound %u times, started over %u times, %u draws or kernels with a set of their own",
+                g_desc_shared ? "one shared set" : "a set per draw (Old descriptors)", db, dw, df);
     for (int k = 0; k < MAX_SURF; k++) {
         Surf* s = &g_surf[k];
         unsigned ms = (unsigned)(g_surf_ns[k] / 1000000);
@@ -343,6 +354,7 @@ typedef struct {
     u16 w, h;
     u64 key;
     u8 wbuf;           // draws: PICA w-buffer (depth from w; the shader must write it)
+    u8 list_start;     // the first step after a command list was submitted (deko3d clears caches there)
     float zn, zf;      // draws: the PICA depth mapping's near and far values (early depth needs both in 0..1)
 } CapOp;
 // Each step has 6 report slots: timestamps before and after, then for draws the fragment shader
@@ -351,17 +363,27 @@ typedef struct {
 static DkMemBlock g_cap_mem;
 static CapOp* g_cap_ops;
 static u32 g_cap_n;
-static volatile int g_cap_req;
-static int g_cap_left, g_cap_frame;
+static unsigned g_flushes;   // command lists submitted (flush)
+static volatile int g_cap_req, g_cap_trace_req;
+static int g_cap_left, g_cap_frame, g_cap_trace;
+static unsigned g_cap_flushes;
+// Trace 1 s: the CPU side of each picture (the graphics thread's time from latch to latch, and how
+// long it waited there for the GPU).
+static u64 g_cap_latch_ns[CAP_FRAMES + 2], g_cap_wait_ns[CAP_FRAMES + 2];
+static u64 g_last_latch_wait;
 static void cap_stamp(u32 slot) {
     dkCmdBufReportCounter(g_cmd, DkCounter_Timestamp, dkMemBlockGetGpuAddr(g_cap_mem) + slot * 16);
 }
 static CapOp* cap_begin(int kind) {
     if (g_cap_left <= 0 || !g_cap_ops || g_cap_n >= CAP_MAX) return 0;
-    dkCmdBufBarrier(g_cmd, DkBarrier_Full, 0);
     u32 i = g_cap_n++;
-    cap_stamp(CAP_SLOTS * i);
-    if (kind == CAP_DRAW) {
+    if (g_cap_trace) {   // no barriers: when the GPU's front end reached the step
+        dkCmdBufReportCounter(g_cmd, DkCounter_TimestampPipelineTop, dkMemBlockGetGpuAddr(g_cap_mem) + CAP_SLOTS * i * 16);
+    } else {
+        dkCmdBufBarrier(g_cmd, DkBarrier_Full, 0);
+        cap_stamp(CAP_SLOTS * i);
+    }
+    if (kind == CAP_DRAW && !g_cap_trace) {
         DkGpuAddr a = dkMemBlockGetGpuAddr(g_cap_mem) + (CAP_SLOTS * i + 2) * 16;
         dkCmdBufReportCounter(g_cmd, DkCounter_FragmentShaderInvocations, a);
         dkCmdBufReportCounter(g_cmd, DkCounter_SamplesPassed, a + 32);
@@ -370,10 +392,16 @@ static CapOp* cap_begin(int kind) {
     memset(o, 0, sizeof *o);
     o->kind = (u8)kind;
     o->frame = (u8)g_cap_frame;
+    o->list_start = g_cap_flushes != g_flushes;
+    g_cap_flushes = g_flushes;
     return o;
 }
 static void cap_end(CapOp* o) {
     if (!o) return;
+    if (g_cap_trace) {   // when the step and everything before it finished
+        cap_stamp(CAP_SLOTS * (u32)(o - g_cap_ops) + 1);
+        return;
+    }
     dkCmdBufBarrier(g_cmd, DkBarrier_Full, 0);
     u32 i = (u32)(o - g_cap_ops);
     cap_stamp(CAP_SLOTS * i + 1);
@@ -399,9 +427,16 @@ static const char* cap_kind_name(int k) {
     }
     return "other";
 }
-void dkr_capture_arm(void) { g_cap_req = 1; msr_receipt("capture: armed; it starts at the next top-screen picture"); }
+void dkr_capture_arm(void) {
+    g_cap_trace_req = g_cap_trace_req2;
+    g_cap_req = 1;
+    msr_receipt("%s: armed; it starts at the next top-screen picture", g_cap_trace_req ? "trace" : "capture");
+}
 static void cap_start(void) {
     g_cap_req = 0;
+    g_cap_trace = g_cap_trace_req;
+    g_cap_trace_req = 0;
+    g_cap_flushes = g_flushes;
     if (!g_cap_mem) {
         DkMemBlockMaker mm;
         dkMemBlockMakerDefaults(&mm, g_dev, CAP_MAX * CAP_SLOTS * 16);
@@ -414,10 +449,78 @@ static void cap_start(void) {
     g_cap_n = 0;
     g_cap_frame = 0;
     g_cap_left = CAP_FRAMES;
-    msr_receipt("capture: started (%d top-screen pictures, 3D screen at %d.%dx)", CAP_FRAMES, g_scale / 2, g_scale & 1 ? 5 : 0);
+    msr_receipt("%s: started (%d top-screen pictures, 3D screen at %d.%dx)", g_cap_trace ? "trace" : "capture", CAP_FRAMES, g_scale / 2,
+                g_scale & 1 ? 5 : 0);
+}
+
+// Trace 1 s: each step's front-end time (when the GPU's command reader reached it) and finish time
+// (when it and all before it were done), with no barriers added, so the steps overlap as in normal
+// play. A step whose front-end time is not before the previous step's finish time waited for it
+// ("in a row"); one far after it found the GPU with nothing to do ("idle before": the CPU had not
+// sent it yet). sdmc:/switch/msr/trace.csv and a summary in the receipt.
+static void trace_finish(void) {
+    const u8* base = (const u8*)dkMemBlockGetCpuAddr(g_cap_mem);
+    FILE* f = fopen("sdmc:/switch/msr/trace.csv", "w");
+    if (f) {
+        fprintf(f, "# MSR-nx trace: %u steps over %d top-screen pictures, 3D screen at %d.%dx, descriptors %s\n", g_cap_n, CAP_FRAMES,
+                g_scale / 2, g_scale & 1 ? 5 : 0, g_desc_shared ? "shared" : "per draw");
+        fprintf(f, "frame,kind,front_us,finish_us,after_prev_finish_us,list_start,target,larger,shader,lit,count\n");
+    }
+    double t_first = 0, prev_finish = 0, busy = 0, idle = 0, inrow_n = 0, overlap_n = 0;
+    double last_end = 0;
+    unsigned inrow_kind[CAP_KINDS] = {0}, inrow_after_kind[CAP_KINDS] = {0}, list_starts = 0;
+    int prev_kind = -1;
+    for (u32 i = 0; i < g_cap_n; i++) {
+        const CapOp* o = &g_cap_ops[i];
+        const u8* sl = base + CAP_SLOTS * i * 16;
+        u64 a = *(volatile const u64*)(sl + 8), b = *(volatile const u64*)(sl + 16 + 8);
+        if (!a || !b) continue;
+        double ta = dkTimestampToNs(a) / 1000.0, tb = dkTimestampToNs(b) / 1000.0;
+        if (!t_first) t_first = ta;
+        ta -= t_first; tb -= t_first;
+        double after = prev_finish ? ta - prev_finish : 0;
+        if (prev_finish) {
+            if (after >= -1.0) { inrow_n++; if (o->kind < CAP_KINDS) inrow_kind[o->kind]++; if (prev_kind >= 0) inrow_after_kind[prev_kind]++; }
+            else overlap_n++;
+            if (after > 20.0) idle += after;
+        }
+        if (o->list_start) list_starts++;
+        double s0 = ta > last_end ? ta : last_end;   // busy time: the union of [front, finish]
+        if (tb > s0) busy += tb - s0;
+        if (tb > last_end) last_end = tb;
+        if (f)
+            fprintf(f, "%u,%s,%.1f,%.1f,%.1f,%u,%08X,%u,%016llX,%u,%u\n", o->frame, cap_kind_name(o->kind), ta, tb, after, o->list_start,
+                    (unsigned)o->target, o->scaled, (unsigned long long)o->key, o->lit, (unsigned)o->n);
+        prev_finish = tb;
+        prev_kind = o->kind;
+    }
+    if (f) {
+        fprintf(f, "# frames: frame,graphics_thread_latch_to_latch_us,waited_for_gpu_at_latch_us\n");
+        for (int k = 1; k <= CAP_FRAMES && k < CAP_FRAMES + 2; k++)
+            fprintf(f, "#f,%d,%.1f,%.1f\n", k, (g_cap_latch_ns[k] - g_cap_latch_ns[k - 1]) / 1000.0, g_cap_wait_ns[k] / 1000.0);
+        fclose(f);
+    }
+    double span = last_end, cpu = 0, wait = 0;
+    for (int k = 1; k <= CAP_FRAMES; k++) { cpu += (g_cap_latch_ns[k] - g_cap_latch_ns[k - 1]) / 1e6; wait += g_cap_wait_ns[k] / 1e6; }
+    msr_receipt("trace: %u steps saved to sdmc:/switch/msr/trace.csv%s (descriptors %s)", g_cap_n, f ? "" : " (could not write the file)",
+                g_desc_shared ? "shared" : "per draw");
+    msr_receipt("trace:   GPU span %.2f ms a picture, busy %.2f ms, idle gaps over 20 us %.2f ms", span / CAP_FRAMES / 1000.0,
+                busy / CAP_FRAMES / 1000.0, idle / CAP_FRAMES / 1000.0);
+    msr_receipt("trace:   steps that waited for the one before: %.0f of %.0f (%u right after a command list was sent)", inrow_n,
+                inrow_n + overlap_n, list_starts);
+    for (int pass = 0; pass < 6; pass++) {
+        int best = -1;
+        for (int k = 0; k < CAP_KINDS; k++) if (inrow_kind[k] && (best < 0 || inrow_kind[k] > inrow_kind[best])) best = k;
+        if (best < 0) break;
+        msr_receipt("trace:     %-12s waited %u times", cap_kind_name(best), inrow_kind[best]);
+        inrow_kind[best] = 0;
+    }
+    msr_receipt("trace:   CPU: graphics thread %.2f ms a picture from latch to latch, %.2f ms of it waiting for the GPU", cpu / CAP_FRAMES,
+                wait / CAP_FRAMES);
 }
 static void cap_finish(void) {
     flush(1);   // every step done and stamped
+    if (g_cap_trace) { trace_finish(); g_cap_trace = 0; return; }
     const u8* base = (const u8*)dkMemBlockGetCpuAddr(g_cap_mem);
     double kind_us[CAP_KINDS] = {0};
     unsigned kind_n[CAP_KINDS] = {0};
@@ -474,11 +577,149 @@ static void cap_finish(void) {
                 ez_us / CAP_FRAMES / 1000.0, late_us / CAP_FRAMES / 1000.0, late_wbuf_us / CAP_FRAMES / 1000.0, late_range_us / CAP_FRAMES / 1000.0);
     msr_receipt("capture:   pixels a picture: %.0f shaded, %.0f passed the depth test", shaded / CAP_FRAMES, passed / CAP_FRAMES);
 }
+
+// ---- A/B descriptors (GPU test row): the shared descriptor set and a set per draw take turns, 10 s
+// each, for as long as it is on, so every place played gets both. Each turn's first 2 s are left out
+// (a change of setting settles there). A receipt line per turn: pictures a second, draws a picture,
+// and how long the graphics thread waited for the GPU a picture (high: the GPU is the limit; near
+// zero: the CPU side is).
+static volatile int g_ab_req;
+static int g_ab_on;
+static u64 g_ab_t0;
+static unsigned g_ab_frames, g_ab_draws0;
+static u64 g_ab_wait;
+static double g_ab_last_fps[2];
+static unsigned g_ab_draws;   // counted in dk_draw
+void dkr_ab_set(int on) { g_ab_req = on ? 1 : 2; }
+static void ab_frame(void) {
+    u64 now = msr_now_ns();
+    if (g_ab_req) {
+        int on = g_ab_req == 1;
+        g_ab_req = 0;
+        if (on && !g_ab_on) { g_ab_on = 1; g_desc_shared = 1; g_ab_t0 = now; g_ab_frames = 0; g_ab_wait = 0; g_ab_draws0 = g_ab_draws;
+                              msr_receipt("ab: started (10 s turns, the first 2 s of each left out)"); }
+        if (!on && g_ab_on) { g_ab_on = 0; g_desc_shared = g_desc_menu; msr_receipt("ab: stopped"); }
+    }
+    if (!g_ab_on) return;
+    u64 el = now - g_ab_t0;
+    if (el < 2000000000ull) { g_ab_frames = 0; g_ab_wait = 0; g_ab_draws0 = g_ab_draws; return; }
+    g_ab_frames++;
+    g_ab_wait += g_last_latch_wait;
+    if (el < 10000000000ull) return;
+    double secs = (el - 2000000000ull) / 1e9, fps = g_ab_frames / secs;
+    int m = g_desc_shared ? 1 : 0;
+    g_ab_last_fps[m] = fps;
+    msr_receipt("ab: %s: %.1f pictures a second, %.0f draws a picture, waited for the GPU %.2f ms a picture%s",
+                m ? "one shared set " : "a set per draw", fps, g_ab_frames ? (double)(g_ab_draws - g_ab_draws0) / g_ab_frames : 0.0,
+                g_ab_frames ? g_ab_wait / 1e6 / g_ab_frames : 0.0, "");
+    if (g_ab_last_fps[0] > 0 && g_ab_last_fps[1] > 0)
+        msr_receipt("ab:   last two turns: shared %.1f, per draw %.1f (%+.1f)", g_ab_last_fps[1], g_ab_last_fps[0], g_ab_last_fps[1] - g_ab_last_fps[0]);
+    g_desc_shared = !g_desc_shared;
+    g_ab_t0 = now;
+}
 static void cap_frame(void) {   // at each top-screen picture
-    if (g_cap_req && g_cap_left <= 0) { cap_start(); return; }
+    if (g_cap_req && g_cap_left <= 0) {
+        cap_start();
+        g_cap_latch_ns[0] = msr_now_ns();
+        return;
+    }
     if (g_cap_left <= 0) return;
     g_cap_frame++;
+    if (g_cap_frame < CAP_FRAMES + 2) { g_cap_latch_ns[g_cap_frame] = msr_now_ns(); g_cap_wait_ns[g_cap_frame] = g_last_latch_wait; }
     if (--g_cap_left == 0) cap_finish();
+}
+
+
+// ---- one shared descriptor set (0.8.3) ------------------------------------------------------------
+// Binding an image or sampler descriptor set makes the GPU finish the work before it, so 0.8.2's
+// set per draw made every draw wait for the one before (0.8.2 capture: about 30 us for a draw that
+// colors no pixel, and normal play no faster than the capture's one-step-at-a-time sum). Now one
+// large set is bound once a command list, and each draw's and kernel's descriptors go into its next
+// slots; the draw picks them by index. Image slots are used once and come round again only after
+// the GPU is idle, with its descriptor cache cleared; samplers are kept by content and never move.
+#define DESC_IMG_N 65536
+#define DESC_SMP_N 4096
+#define SMP_TAB 8192
+static DkMemBlock g_desc_mem;
+static u8* g_desc_cpu;
+static DkGpuAddr g_desc_gpu;
+static u32 g_desc_img_pos, g_smp_n;
+static u8 g_smp_shadow[DESC_SMP_N][sizeof(DkSamplerDescriptor)];
+static u16 g_smp_tab[SMP_TAB];   // sampler slot + 1, by content hash
+static int g_desc_bound;
+static unsigned g_desc_binds, g_desc_wraps, g_desc_fallbacks;
+static void desc_init(DkDevice dev) {
+    DkMemBlockMaker mm;
+    dkMemBlockMakerDefaults(&mm, dev, DESC_IMG_N * sizeof(DkImageDescriptor) + DESC_SMP_N * sizeof(DkSamplerDescriptor));
+    mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+    g_desc_mem = dkMemBlockCreate(&mm);
+    if (!g_desc_mem) return;
+    g_desc_cpu = (u8*)dkMemBlockGetCpuAddr(g_desc_mem);
+    g_desc_gpu = dkMemBlockGetGpuAddr(g_desc_mem);
+}
+// At the start of a draw (where a flush is allowed): room for this draw and the kernels before the
+// next, or start the image slots over once the GPU is idle.
+static void desc_reserve(void) {
+    if (!g_desc_mem || !g_desc_shared || g_desc_img_pos + 64 <= DESC_IMG_N) return;
+    unsigned long long t0 = msr_now_ns();
+    flush(1);
+    g_desc_img_pos = 0;
+    dkCmdBufBarrier(g_cmd, DkBarrier_Full, DkInvalidateFlags_Descriptors);
+    g_desc_wraps++;
+    // a line written straight to the SD card (the receipt is buffered), so a crash or freeze right
+    // after a start-over still leaves this behind
+    FILE* cf = fopen("sdmc:/switch/msr/breadcrumb.txt", "w");
+    if (cf) { fprintf(cf, "descriptor slots started over (%u so far); CPU waited %.2f ms for the GPU\n", g_desc_wraps, (msr_now_ns() - t0) / 1e6); fclose(cf); }
+    msr_receipt("descriptors: slots started over; the CPU waited %.2f ms for the GPU", (msr_now_ns() - t0) / 1e6);
+}
+static int desc_img_put(const DkImageDescriptor* d) {
+    if (!g_desc_mem || !g_desc_shared || g_desc_img_pos >= DESC_IMG_N) return -1;
+    memcpy(g_desc_cpu + g_desc_img_pos * sizeof(DkImageDescriptor), d, sizeof *d);
+    return (int)g_desc_img_pos++;
+}
+static int desc_smp_get(const DkSamplerDescriptor* d) {
+    if (!g_desc_mem || !g_desc_shared) return -1;
+    const u8* b = (const u8*)d;
+    u32 h = 2166136261u;
+    for (u32 k = 0; k < sizeof *d; k++) h = (h ^ b[k]) * 16777619u;
+    for (u32 p = h % SMP_TAB, tries = 0; tries < SMP_TAB; p = (p + 1) % SMP_TAB, tries++) {
+        u16 e = g_smp_tab[p];
+        if (!e) {
+            if (g_smp_n >= DESC_SMP_N) return -1;
+            u32 i = g_smp_n++;
+            memcpy(g_smp_shadow[i], d, sizeof *d);
+            memcpy(g_desc_cpu + DESC_IMG_N * sizeof(DkImageDescriptor) + i * sizeof(DkSamplerDescriptor), d, sizeof *d);
+            g_smp_tab[p] = (u16)(i + 1);
+            return (int)i;
+        }
+        if (!memcmp(g_smp_shadow[e - 1], d, sizeof *d)) return e - 1;
+    }
+    return -1;
+}
+static void desc_bind(void) {
+    if (g_desc_bound) return;
+    dkCmdBufBindImageDescriptorSet(g_cmd, g_desc_gpu, DESC_IMG_N);
+    dkCmdBufBindSamplerDescriptorSet(g_cmd, g_desc_gpu + DESC_IMG_N * sizeof(DkImageDescriptor), DESC_SMP_N);
+    g_desc_bound = 1;
+    g_desc_binds++;
+}
+// n image and n sampler descriptors into the shared set: their texture handles, or 0 (then the
+// caller binds a set of its own, as before 0.8.3).
+static int desc_shared(const DkImageDescriptor* id, const DkSamplerDescriptor* sd, int n, DkResHandle* th, int* img_idx) {
+    if (!g_desc_mem || !g_desc_shared || g_desc_img_pos + (u32)n > DESC_IMG_N) { g_desc_fallbacks++; return 0; }
+    int si[4];
+    for (int k = 0; k < n; k++) if ((si[k] = desc_smp_get(&sd[k])) < 0) { g_desc_fallbacks++; return 0; }
+    for (int k = 0; k < n; k++) {
+        int ii = desc_img_put(&id[k]);
+        if (img_idx) img_idx[k] = ii;
+        if (th) th[k] = dkMakeTextureHandle((u32)ii, (u32)si[k]);
+    }
+    desc_bind();
+    return 1;
+}
+void dkr_desc_stats(unsigned* binds, unsigned* wraps, unsigned* fallbacks) {
+    *binds = g_desc_binds; *wraps = g_desc_wraps; *fallbacks = g_desc_fallbacks;
+    g_desc_binds = g_desc_wraps = g_desc_fallbacks = 0;
 }
 
 // Runs one of the vram_ops.inc kernels: q = four uvec4 parameters, n = invocations.
@@ -505,16 +746,18 @@ static void kernel(int k, const u32 q[16], u32 n, const DkImage* src, const DkIm
         DkSampler smp;
         dkSamplerDefaults(&smp);
         dkSamplerDescriptorInitialize(sd, &smp);
-        dkCmdBufBindImageDescriptorSet(g_cmd, g_dyn_gpu + doff, 2);
-        dkCmdBufBindSamplerDescriptorSet(g_cmd, g_dyn_gpu + doff + 2 * sizeof(DkImageDescriptor), 1);
-        if (src) {
-            DkResHandle th = dkMakeTextureHandle(0, 0);
-            dkCmdBufBindTextures(g_cmd, DkStage_Compute, 0, &th, 1);
+        DkSamplerDescriptor sd2[2] = {sd[0], sd[0]};
+        DkResHandle kh[2];
+        int ki[2];
+        DkResHandle th = dkMakeTextureHandle(0, 0), ih = dkMakeImageHandle(1);
+        if (desc_shared(id, sd2, 2, kh, ki)) { th = kh[0]; ih = dkMakeImageHandle((u32)ki[1]); }
+        else {
+            dkCmdBufBindImageDescriptorSet(g_cmd, g_dyn_gpu + doff, 2);
+            dkCmdBufBindSamplerDescriptorSet(g_cmd, g_dyn_gpu + doff + 2 * sizeof(DkImageDescriptor), 1);
+            g_desc_bound = 0;
         }
-        if (dst) {
-            DkResHandle ih = dkMakeImageHandle(1);
-            dkCmdBufBindImages(g_cmd, DkStage_Compute, 0, &ih, 1);
-        }
+        if (src) dkCmdBufBindTextures(g_cmd, DkStage_Compute, 0, &th, 1);
+        if (dst) dkCmdBufBindImages(g_cmd, DkStage_Compute, 0, &ih, 1);
     }
     DkShader const* sh = &g_k[k];
     dkCmdBufBindShaders(g_cmd, DkStageFlag_Compute, &sh, 1);
@@ -1017,7 +1260,6 @@ static void lut_update(void) {
 
 static unsigned g_program_uploaded = ~0u;
 static DkGpuAddr g_program_addr;
-static unsigned g_flushes;
 
 // Command memory is handed to the command buffer in 256 KB chunks around a ring. Each submitted
 // list's chunks carry the fence signalled after it, and a chunk is reused only after that fence.
@@ -1056,6 +1298,7 @@ static void flush(int wait) {
     g_draws_since_flush = 0;
     g_flushes++;
     g_bound_color = g_bound_depth = 0;   // bindings do not carry over a new command list
+    g_desc_bound = 0;
     g_ts_seg = TS_START;
     ts_mark(TS_NONE);   // the GPU reaching this list: the time since the last one was not the game's
     ts_collect();
@@ -1124,6 +1367,7 @@ static int dk_draw(int indexed) {
     u32 W = r[0x11E] & 0x7FF, H = ((r[0x11E] >> 12) & 0x3FF) + 1;
     u32 cva = pica_vaddr(r[0x11D] << 3), dva = r[0x11C] ? pica_vaddr(r[0x11C] << 3) : 0;
     if (!cva || !W || !H) return 1;
+    desc_reserve();
     if (g_scale_req != g_scale) {   // the scaler changed: every render target starts over at the new size
         surf_reset_all();
         g_scale = g_scale_req;
@@ -1231,6 +1475,7 @@ static int dk_draw(int indexed) {
     // ---- phase C: commands
     ts_mark(TS_SURF0 + (int)(cs - g_surf));
     cs->draws++;
+    g_ab_draws++;
     if ((r[0x8F] & 1) && !(r[0x1C6] & 1)) cs->lit_draws++;
     if (g_bound_color != cs || g_bound_depth != ds) {
         DkImageView cv, dv;
@@ -1298,9 +1543,12 @@ static int dk_draw(int indexed) {
     DkBufExtents ub0 = {ubo, VS_UBO_SIZE}, ub1 = {ubo + VS_UBO_SIZE, FS_UBO_SIZE};
     dkCmdBufBindUniformBuffers(g_cmd, DkStage_Vertex, 0, &ub0, 1);
     dkCmdBufBindUniformBuffers(g_cmd, DkStage_Fragment, 1, &ub1, 1);
-    dkCmdBufBindImageDescriptorSet(g_cmd, g_dyn_gpu + doff, 4);
-    dkCmdBufBindSamplerDescriptorSet(g_cmd, g_dyn_gpu + doff + 4 * sizeof(DkImageDescriptor), 4);
     DkResHandle th[4] = {dkMakeTextureHandle(0, 0), dkMakeTextureHandle(1, 1), dkMakeTextureHandle(2, 2), dkMakeTextureHandle(3, 3)};
+    if (!desc_shared(idesc, sdesc, 4, th, 0)) {
+        dkCmdBufBindImageDescriptorSet(g_cmd, g_dyn_gpu + doff, 4);
+        dkCmdBufBindSamplerDescriptorSet(g_cmd, g_dyn_gpu + doff + 4 * sizeof(DkImageDescriptor), 4);
+        g_desc_bound = 0;
+    }
     dkCmdBufBindTextures(g_cmd, DkStage_Fragment, 0, th, 4);
 
     DkRasterizerState rs;
@@ -1713,14 +1961,17 @@ static int g_latch_fence_set;
 static unsigned long long g_latch_wait_ns;
 static unsigned g_latch_waits;
 static void cap_frame(void);
+static void ab_frame(void);
 static void dk_latch(int screen) {
     flush(0);
     if (screen != 0) return;
     cap_frame();
+    ab_frame();
     if (dkr_frame_limit && g_latch_fence_set) {
         unsigned long long t0 = msr_now_ns();
         dkFenceWait(&g_latch_fence, -1);
         unsigned long long dt = msr_now_ns() - t0;
+        g_last_latch_wait = dt;
         if (dt > 200000ull) { g_latch_waits++; g_latch_wait_ns += dt; }
     }
     g_latch_fence = g_last_fence;
@@ -2236,6 +2487,7 @@ void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock) {
     dkMemBlockMakerDefaults(&mm, dev, 0x2000);
     mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
     g_ubo = dkMemBlockCreate(&mm);
+    desc_init(dev);
 
     dkMemBlockMakerDefaults(&mm, dev, IMG_SIZE);
     mm.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;

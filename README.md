@@ -94,7 +94,7 @@ Up/down picks a row, left/right changes it, A confirms, B or minus closes. Setti
 | Gallery unlocks | The amiibo extras (Metroid II art, concept art, the sound test) in Options > Gallery |
 | Every difficulty | Normal, Hard and Fusion offered for every file's New Game, a new file's too |
 | Fusion suit | Samus in the Fusion suit at any difficulty (damage stays the difficulty's). Her model changes at the next save load or area load; the HUD changes at once |
-| GPU test | For measuring, not saved (every start is Normal). Plain pixels: every draw colored by one tiny shader, so the picture looks wrong on purpose. Capture 1 s: when the game draws again, every GPU step of the next 60 pictures is timed on its own (the game stutters meanwhile) and written to `sdmc:/switch/msr/capture.csv`, with a summary in the receipt |
+| GPU test | For measuring, not saved (every start is Normal). Plain pixels: every draw colored by one tiny shader, so the picture looks wrong on purpose. Capture 1 s: when the game draws again, every GPU step of the next 60 pictures is timed on its own (the game stutters meanwhile) and written to `sdmc:/switch/msr/capture.csv`, with a summary in the receipt. Old descriptors: a descriptor set per draw, as before 0.8.3, for comparing. Trace 1 s: 60 pictures with every GPU step timestamped where it starts and ends, no waits added, to `sdmc:/switch/msr/trace.csv`. A/B descriptors: the shared set and a set per draw take 10 second turns, each turn's result in the receipt |
 | GPU sync, Copies | Renderer options for testing; leave them at Fewer waits and From images |
 | Button mapping | Any Switch button for each 3DS button and for Next beam |
 
