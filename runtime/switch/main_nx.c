@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.8.4 test (shared descriptors, trace, A/B)"
+#define MSR_VERSION "0.8.5 test (shared descriptors without the start-over wait)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"

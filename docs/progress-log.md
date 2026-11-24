@@ -1,5 +1,18 @@
 # Progress log (newest first)
 
+## 2026-11-24 (evening): 0.8.5 test, descriptor slots without the start-over wait
+
+- Alec's 0.8.4 session (2x, 614 MHz, A/B for about 2.5 minutes over several areas): the shared descriptor set
+  ran 50.4 to 56.9 a second, a set per draw 35.2 to 49.4, turn by turn +6.0 to +21.6 (most +10 to +13). Waits
+  for the GPU at the latch: shared about 3 ms a picture, per draw 6 to 10. No visual problems reported.
+- Trace (shared): GPU span 17.75 ms a picture, busy 14.61, idle gaps 2.89; 2047 of 10505 steps waited for the
+  one before (draws 548, each copy, texup, imgcopy and fill once a copy chain); graphics thread 17.82 ms from
+  latch to latch, 1.23 ms of it waiting for the GPU.
+- Problem: the whole-set start-over (flush(1)) came every 2 s or so and the CPU waited 35 to 112 ms each time,
+  plus a breadcrumb.txt write. Now the image slots are 4 parts; moving to the next part is flush(0) and a fence
+  for the part left behind; waiting only if the part ahead is still in use (receipt line when over 1 ms). No
+  breadcrumb file.
+
 ## 2026-11-24 (later): 0.8.4 test, trace, A/B descriptors, start-over log
 
 - Built so one session answers 0.8.3's open cases (Alec): a partial gain, the limit moving to the CPU, a hitch

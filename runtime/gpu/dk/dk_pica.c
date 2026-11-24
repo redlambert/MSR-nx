@@ -327,7 +327,7 @@ void dkr_desc_stats(unsigned* binds, unsigned* wraps, unsigned* fallbacks);
 void dkr_target_report(void) {
     unsigned db, dw, df;
     dkr_desc_stats(&db, &dw, &df);
-    msr_receipt("  descriptors: %s, shared set bound %u times, started over %u times, %u draws or kernels with a set of their own",
+    msr_receipt("  descriptors: %s, shared set bound %u times, moved to the next part of the slots %u times, %u draws or kernels with a set of their own",
                 g_desc_shared ? "one shared set" : "a set per draw (Old descriptors)", db, dw, df);
     for (int k = 0; k < MAX_SURF; k++) {
         Surf* s = &g_surf[k];
@@ -364,6 +364,7 @@ static DkMemBlock g_cap_mem;
 static CapOp* g_cap_ops;
 static u32 g_cap_n;
 static unsigned g_flushes;   // command lists submitted (flush)
+static DkFence g_last_fence;
 static volatile int g_cap_req, g_cap_trace_req;
 static int g_cap_left, g_cap_frame, g_cap_trace;
 static unsigned g_cap_flushes;
@@ -644,6 +645,15 @@ static DkMemBlock g_desc_mem;
 static u8* g_desc_cpu;
 static DkGpuAddr g_desc_gpu;
 static u32 g_desc_img_pos, g_smp_n;
+// The image slots in DESC_SEGS parts. Moving to the next part submits the work so far (its fence
+// marks when the part left behind is free; deko3d clears the descriptor cache at the start of the
+// next submitted work) and waits only if the part coming up is still in use, which it never should
+// be: 0.8.4 started the whole set over with the GPU idle, a 35 to 110 ms wait about every 2 s.
+#define DESC_SEGS 4
+#define DESC_SEG_N (DESC_IMG_N / DESC_SEGS)
+static u32 g_desc_seg, g_desc_seg_end = DESC_SEG_N;
+static DkFence g_desc_seg_fence[DESC_SEGS];
+static int g_desc_seg_pending[DESC_SEGS];
 static u8 g_smp_shadow[DESC_SMP_N][sizeof(DkSamplerDescriptor)];
 static u16 g_smp_tab[SMP_TAB];   // sampler slot + 1, by content hash
 static int g_desc_bound;
@@ -660,20 +670,24 @@ static void desc_init(DkDevice dev) {
 // At the start of a draw (where a flush is allowed): room for this draw and the kernels before the
 // next, or start the image slots over once the GPU is idle.
 static void desc_reserve(void) {
-    if (!g_desc_mem || !g_desc_shared || g_desc_img_pos + 64 <= DESC_IMG_N) return;
-    unsigned long long t0 = msr_now_ns();
-    flush(1);
-    g_desc_img_pos = 0;
-    dkCmdBufBarrier(g_cmd, DkBarrier_Full, DkInvalidateFlags_Descriptors);
+    if (!g_desc_mem || !g_desc_shared || g_desc_img_pos + 64 <= g_desc_seg_end) return;
+    flush(0);
+    g_desc_seg_fence[g_desc_seg] = g_last_fence;
+    g_desc_seg_pending[g_desc_seg] = 1;
+    g_desc_seg = (g_desc_seg + 1) % DESC_SEGS;
+    if (g_desc_seg_pending[g_desc_seg]) {
+        unsigned long long t0 = msr_now_ns();
+        dkFenceWait(&g_desc_seg_fence[g_desc_seg], -1);
+        unsigned long long dt = msr_now_ns() - t0;
+        if (dt > 1000000ull) msr_receipt("descriptors: waited %.2f ms for the GPU to finish with a part of the slots", dt / 1e6);
+        g_desc_seg_pending[g_desc_seg] = 0;
+    }
+    g_desc_img_pos = g_desc_seg * DESC_SEG_N;
+    g_desc_seg_end = g_desc_img_pos + DESC_SEG_N;
     g_desc_wraps++;
-    // a line written straight to the SD card (the receipt is buffered), so a crash or freeze right
-    // after a start-over still leaves this behind
-    FILE* cf = fopen("sdmc:/switch/msr/breadcrumb.txt", "w");
-    if (cf) { fprintf(cf, "descriptor slots started over (%u so far); CPU waited %.2f ms for the GPU\n", g_desc_wraps, (msr_now_ns() - t0) / 1e6); fclose(cf); }
-    msr_receipt("descriptors: slots started over; the CPU waited %.2f ms for the GPU", (msr_now_ns() - t0) / 1e6);
 }
 static int desc_img_put(const DkImageDescriptor* d) {
-    if (!g_desc_mem || !g_desc_shared || g_desc_img_pos >= DESC_IMG_N) return -1;
+    if (!g_desc_mem || !g_desc_shared || g_desc_img_pos >= g_desc_seg_end) return -1;
     memcpy(g_desc_cpu + g_desc_img_pos * sizeof(DkImageDescriptor), d, sizeof *d);
     return (int)g_desc_img_pos++;
 }
@@ -706,7 +720,7 @@ static void desc_bind(void) {
 // n image and n sampler descriptors into the shared set: their texture handles, or 0 (then the
 // caller binds a set of its own, as before 0.8.3).
 static int desc_shared(const DkImageDescriptor* id, const DkSamplerDescriptor* sd, int n, DkResHandle* th, int* img_idx) {
-    if (!g_desc_mem || !g_desc_shared || g_desc_img_pos + (u32)n > DESC_IMG_N) { g_desc_fallbacks++; return 0; }
+    if (!g_desc_mem || !g_desc_shared || g_desc_img_pos + (u32)n > g_desc_seg_end) { g_desc_fallbacks++; return 0; }
     int si[4];
     for (int k = 0; k < n; k++) if ((si[k] = desc_smp_get(&sd[k])) < 0) { g_desc_fallbacks++; return 0; }
     for (int k = 0; k < n; k++) {
@@ -1268,7 +1282,6 @@ static u8 g_chunk_pending[CMD_CHUNKS];
 static u32 g_chunk_next, g_list_chunks[CMD_CHUNKS], g_list_n;
 static DkFence g_seg_fence[DYN_SEGS];
 static u8 g_seg_pending[DYN_SEGS];
-static DkFence g_last_fence;
 
 static void cmd_add_chunk(void) {
     u32 c = g_chunk_next;
