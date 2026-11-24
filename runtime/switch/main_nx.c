@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.8.6 test (lighting values once a draw)"
+#define MSR_VERSION "0.8.7 test (3 screen buffers option, steadier frame counter)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -76,7 +76,8 @@ static DkDevice g_dev;
 static DkQueue g_queue;
 static DkSwapchain g_swap;
 static DkMemBlock g_fb_mem, g_cmd_mem, g_tex_mem, g_up_mem, g_panel_mem, g_fps_mem;
-static DkImage g_fb[2], g_scr[2], g_panel_img, g_fps_img;
+static DkImage g_fb[3], g_scr[2], g_panel_img, g_fps_img;
+static int g_swap_n;   // screen buffers in the swapchain now: 2, or 3 (port menu "Screen buffers")
 // single-screen HUD: its shaders, a uniform block, and the bottom screen's descriptors
 static DkMemBlock g_hud_code, g_hud_data;
 static DkShader g_hud_vsh, g_hud_fsh;
@@ -84,6 +85,21 @@ static DkCmdBuf g_cmd;
 static u32* g_upload;   // CPU-visible staging: top 400x240 then bottom 320x240, RGBA8
 static Mutex g_qlock;   // the game's renderer and the presenter share the queue
 void dkr_init(DkDevice dev, DkQueue q, Mutex* qlock);
+
+// The swapchain with n screen buffers (2 or 3). With 2, a picture that misses a screen refresh by
+// a little leaves the GPU waiting for the next one; a third lets it start the next picture
+// meanwhile (one more frame of delay). Remade when the menu setting changes: the queue must be
+// idle first, called with g_qlock held or before the game starts.
+static void swap_make(int n) {
+    if (n == g_swap_n) return;
+    if (g_swap) { dkQueueWaitIdle(g_queue); dkSwapchainDestroy(g_swap); g_swap = 0; }
+    DkImage const* list[3] = {&g_fb[0], &g_fb[1], &g_fb[2]};
+    DkSwapchainMaker sm;
+    dkSwapchainMakerDefaults(&sm, g_dev, nwindowGetDefault(), list, (u32)n);
+    g_swap = dkSwapchainCreate(&sm);
+    g_swap_n = n;
+    msr_receipt("display: %d screen buffers", n);
+}
 
 static void display_init(void) {
     DkDeviceMaker dm;
@@ -102,14 +118,11 @@ static void display_init(void) {
     u32 fsz = (u32)dkImageLayoutGetSize(&fbl), falign = dkImageLayoutGetAlignment(&fbl);
     fsz = (fsz + falign - 1) & ~(falign - 1);
     DkMemBlockMaker mm;
-    dkMemBlockMakerDefaults(&mm, g_dev, (2 * fsz + 0xFFFF) & ~0xFFFFu);
+    dkMemBlockMakerDefaults(&mm, g_dev, (3 * fsz + 0xFFFF) & ~0xFFFFu);   // room for 3 (Screen buffers)
     mm.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
     g_fb_mem = dkMemBlockCreate(&mm);
-    DkImage const* list[2];
-    for (int k = 0; k < 2; k++) { dkImageInitialize(&g_fb[k], &fbl, g_fb_mem, k * fsz); list[k] = &g_fb[k]; }
-    DkSwapchainMaker sm;
-    dkSwapchainMakerDefaults(&sm, g_dev, nwindowGetDefault(), list, 2);
-    g_swap = dkSwapchainCreate(&sm);
+    for (int k = 0; k < 3; k++) dkImageInitialize(&g_fb[k], &fbl, g_fb_mem, k * fsz);
+    swap_make(2 + g_set.buffers);
 
     // the two screen images, sources for the scaled blits
     DkImageLayout sl[2];
@@ -459,6 +472,7 @@ static void present(void) {
     if (fresh && !done0) convert_screen(0, g_upload, 1);
     if (fresh && !done1) convert_screen(1, g_upload + 400 * 240, 1);
     mutexLock(&g_qlock);
+    swap_make(2 + g_set.buffers);   // the menu setting changed
     int slot = dkQueueAcquireImage(g_queue, g_swap);
     mutexUnlock(&g_qlock);
     DkImageView fbv, sv[2];
@@ -688,9 +702,11 @@ static void present(void) {
         dkCmdBufBarrier(g_cmd, DkBarrier_Fragments, 0);   // before the blits that follow
     }
     if (g_set.show_fps) {
-        // New top screen pictures put on the Switch's screen, timed from the first of the last
-        // second or so to the last one. Counting whole pictures over a fixed half second made a
-        // steady 30 read 28 to 32, depending on where the window edges fell.
+        // New top screen pictures put on the Switch's screen, over the screen refreshes from the
+        // first of the last second or so to the last one. The time is rounded to whole refreshes
+        // (60 a second), so the few ms the CPU's present time wobbles no longer reads as 59.9 or
+        // 60.4: a picture at every refresh reads 60.0, and only a missed refresh lowers it.
+        // (Counting whole pictures over a fixed half second made a steady 30 read 28 to 32.)
         static unsigned long long t0;
         static unsigned s0;
         static int fps10;
@@ -698,8 +714,10 @@ static void present(void) {
         unsigned long long t1 = shown_ns;
         if (!t0) { t0 = t1; s0 = s1; }
         if (t1 > t0 && t1 - t0 >= 1000000000ull) {
-            fps10 = (int)((unsigned long long)(s1 - s0) * 10000000000ull / (t1 - t0));
-            if (fps10 > 999) fps10 = 999;
+            const unsigned long long refresh = 16666667ull;   // ns, 60 Hz
+            unsigned long long n = (t1 - t0 + refresh / 2) / refresh;
+            fps10 = (int)((unsigned long long)(s1 - s0) * 600ull / n);
+            if (fps10 > 600) fps10 = 600;
             t0 = t1;
             s0 = s1;
         } else if (msr_now_ns() - t1 > 2000000000ull) {
@@ -1137,8 +1155,8 @@ int main(int argc, char** argv) {
                     unsigned lw, lm;
                     dkr_latch_stats(&lw, &lm);
                     static unsigned shown_last;
-                    msr_receipt("  screen: %u new top-screen pictures shown; show newest frame %s, %u waits (%u ms)",
-                                g_shown_total - shown_last, g_set.newest ? "on" : "off", lw, lm);
+                    msr_receipt("  screen: %u new top-screen pictures shown; show newest frame %s, %u waits (%u ms); %d screen buffers",
+                                g_shown_total - shown_last, g_set.newest ? "on" : "off", lw, lm, g_swap_n);
                     shown_last = g_shown_total;
                     unsigned long long msr_interp_steps(void);
                     static unsigned long long steps_last;

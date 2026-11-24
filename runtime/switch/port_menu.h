@@ -22,6 +22,7 @@ typedef struct {
     int copies;        // GX copies and transfers: 0 from render target images, 1 through VRAM (dk_pica.c img_source)
     int newest;        // Show newest frame: 1 the GPU's frame queue limit (dk_pica.c dkr_frame_limit), 0 off
     int gtest;         // GPU test (not saved): 0 Normal, 1 Plain pixels, 2 Capture 1 s, 3 Old descriptors, 4 Trace 1 s, 5 A/B descriptors (dk_pica.c dkr_set_gpu_test)
+    int buffers;       // Screen buffers: 0 two, 1 three (main_nx.c swap_make)
     int minimap;       // single-screen mode: 1 the bottom screen's map around Samus drawn in the top right during play
     int extras;        // MSR_EXTRA_* bits (os/extras.h): galleries, every difficulty, Fusion suit
     u64 bind[NBIND];   // Switch button (HidNpadButton_*) for A, B, X, Y, L, R, Start, Select, Next beam

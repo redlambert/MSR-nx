@@ -1,5 +1,18 @@
 # Progress log (newest first)
 
+## 2026-11-25: 0.8.7 test, 3 screen buffers option, steadier frame counter
+
+- Alec: 60 a second at 1.5x is close now, with the counter moving between 59, 59.9 and 60.4.
+- Port menu "Screen buffers" (2, or 3 (smoother); saved as buffers= in settings.ini): main_nx.c swap_make
+  remakes the swapchain with 2 or 3 of the 1280x720 output images (room for 3 is always kept) after
+  dkQueueWaitIdle, under the queue lock, at the next present. With 2, a picture that misses a refresh by a
+  little leaves the GPU waiting for the next one; with 3 it starts the next picture meanwhile (one more frame
+  of delay). Receipt: "display: N screen buffers" and the count on each "screen:" line.
+- Frame counter: the time from the first to the last shown picture in the window is rounded to whole 60 Hz
+  refreshes, so present-time wobble no longer reads as 59.9 or 60.4. Every refresh with a new picture reads
+  60.0; only a missed refresh lowers it.
+- Menu rows 22 px apart (23 left the new row overlapping the help line).
+
 ## 2026-11-24 (night): 0.8.6 test, light values once a draw
 
 - pica_fsh.glsl: each light's colors (col10), position and distance bias and scale (pfloat), spot direction
