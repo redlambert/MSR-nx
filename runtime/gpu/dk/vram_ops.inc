@@ -214,12 +214,20 @@ void k_copy_img(uint gid) {
     uint oa = q[0].y + bo * (ow + q[1].w) + (b - bo * ow);
     uint sa = q[2].x, w = q[2].y, h = q[2].z, fmt = q[2].w, bpp = fb_bpp(fmt), tiles_x = w / 8u;
     uint v = 0u;
+    // A pixel is read (2 x 2 image pixels at 2x) once for all of its bytes in this word: at 4 bytes a
+    // pixel that is one read instead of four (0.8.1 capture: 2.8 ms a picture at 2x, 3 copies).
+    uint o = ia - sa, m = udiv(o, bpp), k = o - m * bpp;
+    uint e = 0u, have = 0u;
     for (uint t = 0u; t < 4u; t++) {
-        uint o = ia + t - sa, m = udiv(o, bpp), k = o - m * bpp;
-        uint tile = m >> 6u, tr = udiv(tile, tiles_x);
-        uint x = (tile - tr * tiles_x) * 8u + demorton_x(m & 63u), y = tr * 8u + demorton_y(m & 63u);
-        uint e = px_encode(img_read_s(x, h - 1u - y, w, h), fmt);
+        if (have == 0u) {
+            uint tile = m >> 6u, tr = udiv(tile, tiles_x);
+            uint x = (tile - tr * tiles_x) * 8u + demorton_x(m & 63u), y = tr * 8u + demorton_y(m & 63u);
+            e = px_encode(img_read_s(x, h - 1u - y, w, h), fmt);
+            have = 1u;
+        }
         v |= ((e >> (8u * k)) & 0xFFu) << (8u * t);
+        k++;
+        if (k == bpp) { k = 0u; m++; have = 0u; }
     }
     STW(oa >> 2u, v);
 }

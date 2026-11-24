@@ -1,5 +1,20 @@
 # Progress log (newest first)
 
+## 2026-11-23 (late night): 0.8.2 test, faster screen copies and a fuller capture
+
+- Alec's 0.8.1 capture (2x, 614 MHz, gameplay; each step timed by itself): 21.7 ms a picture. Draws 13.4 ms
+  (about 150 a picture, all with fragment lighting, 1 light). One fragment shader, 0CCB1BD4A92D3CF8, is 85 draws and
+  7.2 ms a picture (about 85 us each, mostly under 200 vertices); those draws test and write depth without early
+  depth. Then copy_img 2.8 ms (3 a picture, 0.93 ms each), texup 1.4, transfer_img 1.4, imgcopy 0.8, transfer 0.6,
+  hires 0.6, clears 0.3, store 0.2, fill 0.1. (At 768 MHz in a menu-heavy stretch: 13.9 ms, the same order.)
+- k_copy_img: each pixel of the target is read once for all of its bytes in an output word (four reads of a
+  pixel became one at 4 bytes a pixel, two at 3). Checked against 0.8.1's kernel on the CPU (vram_ref.cpp, both
+  compiled side by side): 400 random copies, formats 0 to 4, native, 2x and 1.5x images, offsets, row gaps: every
+  byte the same.
+- Capture: draws also report fragment shader invocations and samples passed (two more counter pairs a step,
+  CAP_SLOTS 6), the w-buffer bit and the depth mapping's near and far. Receipt: draw time with and without early
+  depth (without: w-buffer, or a depth range outside 0..1), and pixels shaded and passed a picture.
+
 ## 2026-11-23 (night): 0.8.1 test, frame capture
 
 - Alec's 0.8.0 receipt (2x, 614 MHz, 60 fps): Normal 37 to 40; Plain pixels 49 to 55 (pica_fsh.glsl about 30% of a

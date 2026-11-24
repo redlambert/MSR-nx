@@ -342,7 +342,12 @@ typedef struct {
     u32 target, n, area;
     u16 w, h;
     u64 key;
+    u8 wbuf;           // draws: PICA w-buffer (depth from w; the shader must write it)
+    float zn, zf;      // draws: the PICA depth mapping's near and far values (early depth needs both in 0..1)
 } CapOp;
+// Each step has 6 report slots: timestamps before and after, then for draws the fragment shader
+// invocations (pixels shaded) and the samples that passed the depth test, before and after.
+#define CAP_SLOTS 6
 static DkMemBlock g_cap_mem;
 static CapOp* g_cap_ops;
 static u32 g_cap_n;
@@ -355,7 +360,12 @@ static CapOp* cap_begin(int kind) {
     if (g_cap_left <= 0 || !g_cap_ops || g_cap_n >= CAP_MAX) return 0;
     dkCmdBufBarrier(g_cmd, DkBarrier_Full, 0);
     u32 i = g_cap_n++;
-    cap_stamp(2 * i);
+    cap_stamp(CAP_SLOTS * i);
+    if (kind == CAP_DRAW) {
+        DkGpuAddr a = dkMemBlockGetGpuAddr(g_cap_mem) + (CAP_SLOTS * i + 2) * 16;
+        dkCmdBufReportCounter(g_cmd, DkCounter_FragmentShaderInvocations, a);
+        dkCmdBufReportCounter(g_cmd, DkCounter_SamplesPassed, a + 32);
+    }
     CapOp* o = &g_cap_ops[i];
     memset(o, 0, sizeof *o);
     o->kind = (u8)kind;
@@ -365,7 +375,13 @@ static CapOp* cap_begin(int kind) {
 static void cap_end(CapOp* o) {
     if (!o) return;
     dkCmdBufBarrier(g_cmd, DkBarrier_Full, 0);
-    cap_stamp(2 * (u32)(o - g_cap_ops) + 1);
+    u32 i = (u32)(o - g_cap_ops);
+    cap_stamp(CAP_SLOTS * i + 1);
+    if (o->kind == CAP_DRAW) {
+        DkGpuAddr a = dkMemBlockGetGpuAddr(g_cap_mem) + (CAP_SLOTS * i + 3) * 16;
+        dkCmdBufReportCounter(g_cmd, DkCounter_FragmentShaderInvocations, a);
+        dkCmdBufReportCounter(g_cmd, DkCounter_SamplesPassed, a + 32);
+    }
 }
 static const char* cap_kind_name(int k) {
     static const char* kn[13] = {"fill", "copy", "transfer", "store", "load", "texdecode", "screen", "transfer_img",
@@ -388,13 +404,13 @@ static void cap_start(void) {
     g_cap_req = 0;
     if (!g_cap_mem) {
         DkMemBlockMaker mm;
-        dkMemBlockMakerDefaults(&mm, g_dev, CAP_MAX * 2 * 16);
+        dkMemBlockMakerDefaults(&mm, g_dev, CAP_MAX * CAP_SLOTS * 16);
         mm.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
         g_cap_mem = dkMemBlockCreate(&mm);
     }
     if (!g_cap_ops) g_cap_ops = (CapOp*)malloc(CAP_MAX * sizeof(CapOp));
     if (!g_cap_mem || !g_cap_ops) { msr_receipt("capture: out of memory, not started"); return; }
-    memset(dkMemBlockGetCpuAddr(g_cap_mem), 0, CAP_MAX * 2 * 16);
+    memset(dkMemBlockGetCpuAddr(g_cap_mem), 0, CAP_MAX * CAP_SLOTS * 16);
     g_cap_n = 0;
     g_cap_frame = 0;
     g_cap_left = CAP_FRAMES;
@@ -405,27 +421,40 @@ static void cap_finish(void) {
     const u8* base = (const u8*)dkMemBlockGetCpuAddr(g_cap_mem);
     double kind_us[CAP_KINDS] = {0};
     unsigned kind_n[CAP_KINDS] = {0};
-    double lit_us = 0, unlit_us = 0;
+    double lit_us = 0, unlit_us = 0, shaded = 0, passed = 0, ez_us = 0, late_us = 0, late_wbuf_us = 0, late_range_us = 0;
     FILE* f = fopen("sdmc:/switch/msr/capture.csv", "w");
     if (f) {
         fprintf(f, "# MSR-nx capture: %u steps over %d top-screen pictures, 3D screen at %d.%dx\n", g_cap_n, CAP_FRAMES,
                 g_scale / 2, g_scale & 1 ? 5 : 0);
-        fprintf(f, "frame,kind,gpu_us,target,w,h,larger,shader,early_depth,lit,lights,textures,count,area,depth_test,depth_write,blend,alpha_test,stencil\n");
+        fprintf(f, "frame,kind,gpu_us,target,w,h,larger,shader,early_depth,lit,lights,textures,count,area,depth_test,depth_write,blend,alpha_test,stencil,"
+                   "w_buffer,depth_near,depth_far,pixels_shaded,pixels_passed\n");
     }
     for (u32 i = 0; i < g_cap_n; i++) {
         const CapOp* o = &g_cap_ops[i];
-        u64 t0 = *(volatile const u64*)(base + 2 * i * 16 + 8), t1 = *(volatile const u64*)(base + (2 * i + 1) * 16 + 8);
+        const u8* sl = base + CAP_SLOTS * i * 16;
+        u64 t0 = *(volatile const u64*)(sl + 8), t1 = *(volatile const u64*)(sl + 16 + 8);
         double us = (t0 && t1 && t1 >= t0) ? (dkTimestampToNs(t1) - dkTimestampToNs(t0)) / 1000.0 : -1;
+        u64 f0 = *(volatile const u64*)(sl + 32), f1 = *(volatile const u64*)(sl + 48);
+        u64 p0 = *(volatile const u64*)(sl + 64), p1 = *(volatile const u64*)(sl + 80);
+        u64 fsn = o->kind == CAP_DRAW && f1 >= f0 ? f1 - f0 : 0, psn = o->kind == CAP_DRAW && p1 >= p0 ? p1 - p0 : 0;
+        if (o->kind == CAP_DRAW && us >= 0) {
+            shaded += (double)fsn; passed += (double)psn;
+            if (o->ez) ez_us += us;
+            else {
+                late_us += us;
+                if (o->wbuf) late_wbuf_us += us; else late_range_us += us;
+            }
+        }
         if (us >= 0 && o->kind < CAP_KINDS) {
             kind_us[o->kind] += us;
             kind_n[o->kind]++;
             if (o->kind == CAP_DRAW) { if (o->lit) lit_us += us; else unlit_us += us; }
         }
         if (f)
-            fprintf(f, "%u,%s,%.1f,%08X,%u,%u,%u,%016llX,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", o->frame, cap_kind_name(o->kind), us,
-                    (unsigned)o->target, o->w, o->h, o->scaled, (unsigned long long)o->key, o->ez, o->lit, o->lights, o->tex,
-                    (unsigned)o->n, (unsigned)o->area, o->state & 1, (o->state >> 1) & 1, (o->state >> 2) & 1, (o->state >> 3) & 1,
-                    (o->state >> 4) & 1);
+            fprintf(f, "%u,%s,%.1f,%08X,%u,%u,%u,%016llX,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.4f,%.4f,%llu,%llu\n", o->frame,
+                    cap_kind_name(o->kind), us, (unsigned)o->target, o->w, o->h, o->scaled, (unsigned long long)o->key, o->ez, o->lit,
+                    o->lights, o->tex, (unsigned)o->n, (unsigned)o->area, o->state & 1, (o->state >> 1) & 1, (o->state >> 2) & 1,
+                    (o->state >> 3) & 1, (o->state >> 4) & 1, o->wbuf, o->zn, o->zf, (unsigned long long)fsn, (unsigned long long)psn);
     }
     if (f) fclose(f);
     msr_receipt("capture: %u steps saved to sdmc:/switch/msr/capture.csv%s", g_cap_n, f ? "" : " (could not write the file)");
@@ -441,6 +470,9 @@ static void cap_finish(void) {
         kind_n[best] = 0;
     }
     msr_receipt("capture:   draws with lighting %.2f ms a picture, without %.2f ms", lit_us / CAP_FRAMES / 1000.0, unlit_us / CAP_FRAMES / 1000.0);
+    msr_receipt("capture:   draws with early depth %.2f ms, without %.2f ms (w-buffer %.2f, depth range outside 0..1 %.2f)",
+                ez_us / CAP_FRAMES / 1000.0, late_us / CAP_FRAMES / 1000.0, late_wbuf_us / CAP_FRAMES / 1000.0, late_range_us / CAP_FRAMES / 1000.0);
+    msr_receipt("capture:   pixels a picture: %.0f shaded, %.0f passed the depth test", shaded / CAP_FRAMES, passed / CAP_FRAMES);
 }
 static void cap_frame(void) {   // at each top-screen picture
     if (g_cap_req && g_cap_left <= 0) { cap_start(); return; }
@@ -1350,6 +1382,8 @@ static int dk_draw(int indexed) {
         co->target = cs->addr; co->w = (u16)cs->sw; co->h = (u16)cs->sh; co->scaled = (u8)cs->scaled;
         co->key = pica_fs_key(); co->ez = (u8)ez; co->lit = (u8)lit; co->lights = lit ? (u8)((r[0x1C2] & 7) + 1) : 0;
         co->tex = (u8)(r[0x80] & 7); co->n = n; co->area = sc.width * sc.height;
+        float zs = pica_f24(r[0x4D]), zo = pica_f24(r[0x4E]);
+        co->wbuf = !(r[0x6D] & 1); co->zn = zo; co->zf = zo - zs;
         co->state = (u8)((dss.depthTestEnable && (dm & 1) ? 1 : 0) | (dss.depthWriteEnable ? 2 : 0) | (cst.blendEnableMask ? 4 : 0) |
                          (r[0x104] & 1 ? 8 : 0) | (dss.stencilTestEnable ? 16 : 0));
     }

@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.8.1 test (frame capture)"
+#define MSR_VERSION "0.8.2 test (faster screen copies, fuller capture)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
