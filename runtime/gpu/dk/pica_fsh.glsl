@@ -19,6 +19,11 @@ layout (binding = 3) uniform sampler2D luts;   // 256 x 24, value in r, differen
 layout (std140, binding = 1) uniform FragmentState {
     uvec4 regs[88];   // PICA registers 0x80..0x1DF
     vec4 depth;       // x scale, y offset, z 1 for a w-buffer
+    // The light values worked out once a draw on the CPU (dk_pica.c fs_lights) instead of once a
+    // pixel here: for light n, lt[7n + 0..3] its two specular colors, diffuse and ambient color,
+    // 7n + 4 its position, 7n + 5 its spot direction, 7n + 6 the distance bias and scale; lt[56]
+    // the global ambient color. Each is exactly the value the decoding below used to give.
+    vec4 lt[57];
 };
 
 // The register's word: the uvec4 by index, then the component by plain choices. No array in this
@@ -149,17 +154,17 @@ void lighting() {
     uint count = (reg(0x1C2u) & 7u) + 1u;
     for (uint slot = 0u; slot < count; slot++) {
         uint num = (reg(0x1D9u) >> (4u * slot)) & 7u;
-        uint b = 0x140u + 0x10u * num;
-        vec3 s0 = col10(reg(b)), s1 = col10(reg(b + 1u)), dcol = col10(reg(b + 2u)), acol = col10(reg(b + 3u));
-        vec3 pos = vec3(pfloat(reg(b + 4u) & 0xFFFFu, 10u, 5u), pfloat(reg(b + 4u) >> 16, 10u, 5u), pfloat(reg(b + 5u) & 0xFFFFu, 10u, 5u));
-        vec3 spot = vec3(fix13(reg(b + 6u)), fix13(reg(b + 6u) >> 16), fix13(reg(b + 7u)));
+        uint b = 0x140u + 0x10u * num, li = 7u * num;
+        vec3 s0 = lt[li].rgb, s1 = lt[li + 1u].rgb, dcol = lt[li + 2u].rgb, acol = lt[li + 3u].rgb;
+        vec3 pos = lt[li + 4u].xyz;
+        vec3 spot = lt[li + 5u].xyz;
         uint lf = reg(b + 9u);
         bool two = ((lf >> 1) & 1u) != 0u;
         vec3 lv = normalize((lf & 1u) != 0u ? pos : pos + view);
         vec3 half_v = nv + lv, hu = length(half_v) > 0.0 ? normalize(half_v) : vec3(0.0);
         float dist = 1.0;
         if (((c1 >> (24u + num)) & 1u) == 0u) {
-            float bias = pfloat(reg(b + 10u) & 0xFFFFFu, 12u, 7u), scl = pfloat(reg(b + 11u) & 0xFFFFFu, 12u, 7u);
+            float bias = lt[li + 6u].x, scl = lt[li + 6u].y;
             float p = clamp(scl * length(-view - pos) + bias, 0.0, 1.0);
             dist = lut(16u + num, p * 256.0);
         }
@@ -214,7 +219,7 @@ void lighting() {
         if (((c0 >> 2) & 1u) != 0u) diff.a *= shadow.a;
         if (((c0 >> 3) & 1u) != 0u) spec.a *= shadow.a;
     }
-    diff.rgb += col10(reg(0x1C0u));
+    diff.rgb += lt[56].rgb;
     fprim = clamp(diff, 0.0, 1.0);
     fsec = clamp(spec, 0.0, 1.0);
 }

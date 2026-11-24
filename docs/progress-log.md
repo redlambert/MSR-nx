@@ -1,5 +1,19 @@
 # Progress log (newest first)
 
+## 2026-11-24 (night): 0.8.6 test, light values once a draw
+
+- pica_fsh.glsl: each light's colors (col10), position and distance bias and scale (pfloat), spot direction
+  (fix13) and the global ambient color came from register words decoded in every pixel. Now dk_pica.c
+  fs_lights works them out once a draw into FragmentState.lt[57] (7 vec4 a light, then the ambient), the same
+  steps bit for bit (lt_pfloat and lt_fix13 checked against the shader's code on 200000 random words: all the
+  same; col10 and fix13 divide by 255 and 2047 as the shader does). FS_UBO_SIZE 0x600 to 0xA00; the kernels' and
+  the main thread's uniform slots moved to 0x1400 and 0x1500. glslangValidator: pica_fsh.glsl compiles.
+- The shader pack (copied from the official msr.nro) and the cache's fs_ files are the older shader: still
+  correct (they read regs and depth where they always were), just slower. fs_select now prefers a shader
+  compiled from the current source (fs2_ files in shadercache, RtShader.v2), else takes the older one and asks
+  the compiler for the newer in the background (nothing waits); the choice is redone when a compile lands.
+  Receipt: "lighting trim" line (draws on each, compiles asked).
+
 ## 2026-11-24 (evening): 0.8.5 test, descriptor slots without the start-over wait
 
 - Alec's 0.8.4 session (2x, 614 MHz, A/B for about 2.5 minutes over several areas): the shared descriptor set

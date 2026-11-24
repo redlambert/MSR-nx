@@ -12,7 +12,7 @@
 #include <sys/stat.h>
 #include <switch.h>
 #include "boot.h"
-#define MSR_VERSION "0.8.5 test (shared descriptors without the start-over wait)"
+#define MSR_VERSION "0.8.6 test (lighting values once a draw)"
 #include "frame_plan.h"
 #include "audio_stretch.h"
 #include "msr_cpu.h"
@@ -1118,6 +1118,10 @@ int main(int argc, char** argv) {
                 unsigned wt;
                 dkr_fs_stats(&h, &m, &wt);
                 msr_receipt("  fragment shaders: %u draws specialized, %u on the general one, %u waited for a compile", h, m, wt);
+                void dkr_fs_version_stats(unsigned* newer, unsigned* older, unsigned* asked);
+                unsigned fn, fo, fa;
+                dkr_fs_version_stats(&fn, &fo, &fa);
+                msr_receipt("  lighting trim: %u draws with the trimmed shader, %u still with the older one (%u background compiles asked)", fn, fo, fa);
                 void dkr_compile_stats(unsigned* compiled, unsigned* avg_ms, unsigned* max_ms, unsigned* pending);
                 unsigned cc, ca, cm, cp;
                 dkr_compile_stats(&cc, &ca, &cm, &cp);

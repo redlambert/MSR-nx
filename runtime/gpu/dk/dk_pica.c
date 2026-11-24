@@ -34,7 +34,7 @@
 #define DYN_SEG (DYN_SIZE / DYN_SEGS)
 #define SURF_REGION (64u << 20)
 #define VS_UBO_SIZE 0xA00u
-#define FS_UBO_SIZE 0x600u
+#define FS_UBO_SIZE 0xA00u   // 0.8.6: the registers, the depth mapping and the light values (pica_fsh.glsl lt)
 
 static DkDevice g_dev;
 static DkQueue g_q;
@@ -736,13 +736,48 @@ void dkr_desc_stats(unsigned* binds, unsigned* wraps, unsigned* fallbacks) {
     g_desc_binds = g_desc_wraps = g_desc_fallbacks = 0;
 }
 
+
+// ---- light values for pica_fsh.glsl (lt) ---------------------------------------------------------
+// What the shader's col10, pfloat and fix13 gave for each light's registers, once a draw here
+// instead of once a pixel there (0.8.3 trace: the draws, all lit, are most of a picture's GPU time).
+// R(id) is PICA register id. Same steps as the shader's functions, bit for bit.
+typedef struct { u32 regs[352]; float depth[4]; float lt[57][4]; } FsUniforms;
+static float lt_pfloat(u32 bits, u32 man, u32 ex) {
+    u32 width = man + ex + 1;
+    u32 sgn = (bits >> (man + ex)) & 1;
+    if ((bits & ((1u << (width - 1)) - 1)) == 0) return sgn ? -0.0f : 0.0f;
+    u32 biased = (bits >> man) & ((1u << ex) - 1);
+    biased = biased == (1u << ex) - 1 ? 255u : biased + 128u - (1u << (ex - 1));
+    u32 w = (sgn << 31) | ((bits & ((1u << man) - 1)) << (23 - man)) | (biased << 23);
+    float f;
+    memcpy(&f, &w, 4);
+    return f;
+}
+static float lt_fix13(u32 v) { return (float)(((int32_t)((v & 0x1FFFu) << 19)) >> 19) / 2047.0f; }
+static void lt_col10(float* o, u32 v) {
+    o[0] = (float)((v >> 20) & 0x3FF) / 255.0f; o[1] = (float)((v >> 10) & 0x3FF) / 255.0f; o[2] = (float)(v & 0x3FF) / 255.0f; o[3] = 0;
+}
+static void fs_lights(FsUniforms* fs) {
+#define R(id) fs->regs[(id) - 0x80]
+    for (u32 n = 0; n < 8; n++) {
+        u32 b = 0x140 + 0x10 * n;
+        float (*l)[4] = &fs->lt[7 * n];
+        lt_col10(l[0], R(b)); lt_col10(l[1], R(b + 1)); lt_col10(l[2], R(b + 2)); lt_col10(l[3], R(b + 3));
+        l[4][0] = lt_pfloat(R(b + 4) & 0xFFFF, 10, 5); l[4][1] = lt_pfloat(R(b + 4) >> 16, 10, 5); l[4][2] = lt_pfloat(R(b + 5) & 0xFFFF, 10, 5); l[4][3] = 0;
+        l[5][0] = lt_fix13(R(b + 6)); l[5][1] = lt_fix13(R(b + 6) >> 16); l[5][2] = lt_fix13(R(b + 7)); l[5][3] = 0;
+        l[6][0] = lt_pfloat(R(b + 10) & 0xFFFFF, 12, 7); l[6][1] = lt_pfloat(R(b + 11) & 0xFFFFF, 12, 7); l[6][2] = l[6][3] = 0;
+    }
+    lt_col10(fs->lt[56], R(0x1C0));
+#undef R
+}
+
 // Runs one of the vram_ops.inc kernels: q = four uvec4 parameters, n = invocations.
 static void kernel(int k, const u32 q[16], u32 n, const DkImage* src, const DkImage* dst) {
     if (!n) return;
     g_vram_ops[k]++;
     ts_mark(TS_VRAM);
     gpu_barrier();   // what earlier draws and kernels wrote is visible
-    DkGpuAddr ubo = dkMemBlockGetGpuAddr(g_ubo) + 0x1000;   // after the draw uniforms
+    DkGpuAddr ubo = dkMemBlockGetGpuAddr(g_ubo) + 0x1400;   // after the draw uniforms (VS_UBO_SIZE + FS_UBO_SIZE)
     dkCmdBufPushConstants(g_cmd, ubo, 64, 0, 64, q);
     DkBufExtents ub = {ubo, 64};
     dkCmdBufBindUniformBuffers(g_cmd, DkStage_Compute, 0, &ub, 1);
@@ -1549,9 +1584,10 @@ static int dk_draw(int indexed) {
     }
     DkGpuAddr ubo = dkMemBlockGetGpuAddr(g_ubo);
     dkCmdBufPushConstants(g_cmd, ubo, VS_UBO_SIZE, 0, sizeof vs, &vs);
-    struct { u32 regs[352]; float depth[4]; } fs;
+    FsUniforms fs;
     memcpy(fs.regs, r + 0x80, sizeof fs.regs);
     fs.depth[0] = pica_f24(r[0x4D]); fs.depth[1] = pica_f24(r[0x4E]); fs.depth[2] = (r[0x6D] & 1) ? 0.f : 1.f; fs.depth[3] = 0;
+    fs_lights(&fs);
     dkCmdBufPushConstants(g_cmd, ubo + VS_UBO_SIZE, FS_UBO_SIZE, 0, sizeof fs, &fs);
     DkBufExtents ub0 = {ubo, VS_UBO_SIZE}, ub1 = {ubo + VS_UBO_SIZE, FS_UBO_SIZE};
     dkCmdBufBindUniformBuffers(g_cmd, DkStage_Vertex, 0, &ub0, 1);
@@ -2006,7 +2042,7 @@ int dkr_record_screen(DkCmdBuf cmd, int screen, u32 addr, u32 stride, u32 format
     u32 bytes = W * (stride ? stride : 240 * bpp);
     if (!in_vram(addr, bytes)) return 0;
     u32 q[16] = {addr - VRAM_BASE, stride, format, W, out_word, 1};
-    DkGpuAddr ubo = dkMemBlockGetGpuAddr(g_ubo) + 0x1100;   // the main thread's own slot
+    DkGpuAddr ubo = dkMemBlockGetGpuAddr(g_ubo) + 0x1500;   // the main thread's own slot
     dkCmdBufPushConstants(cmd, ubo, 64, 0, 64, q);
     DkBufExtents ub = {ubo, 64};
     dkCmdBufBindUniformBuffers(cmd, DkStage_Compute, 0, &ub, 1);
@@ -2041,6 +2077,7 @@ static DkMemBlock g_pack_code;
 static char g_new_path[256], g_fs_new_path[256];
 static unsigned g_vs_hits, g_vs_misses;
 static const DkShader* rt_find(u64 key);
+static const DkShader* rt_find_v(u64 key, int v2);
 static int compile_request(u64 key, int vert, int ez);
 static void fs_compile_poll(void);
 static volatile unsigned g_jobs_live;
@@ -2134,11 +2171,15 @@ static unsigned g_fs_hits, g_fs_misses;
 // out those frames rather than run on the general shader).
 #define EZ_BIT (1ull << 63)
 static unsigned g_ez_draws, g_fs_waits;
+static unsigned g_fs_old, g_fs_new, g_fs_asked;
+void dkr_fs_version_stats(unsigned* newer, unsigned* older, unsigned* asked) {
+    *newer = g_fs_new; *older = g_fs_old; *asked = g_fs_asked; g_fs_new = g_fs_old = g_fs_asked = 0;
+}
 static const DkShader* fs_select(int* ez) {
     static u64 last_key;
-    static int last_ez;
+    static int last_ez, last_old;
     static const DkShader* last = 0;
-    static unsigned seen_version;
+    static unsigned seen_version, seen_rt;
     const u32* r = g_pica.reg;
     float scale = pica_f24(r[0x4D]), offset = pica_f24(r[0x4E]);
     float nearz = offset, farz = offset - scale;
@@ -2148,24 +2189,40 @@ static const DkShader* fs_select(int* ez) {
     if (g_jobs_live) fs_compile_poll();
     if (seen_version != g_force_version) { seen_version = g_force_version; last = 0; }
     if (g_test & 1) { *ez = want_ez; last = 0; return &g_plain_fsh; }   // GPU test: plain pixels
+    if (last_old && seen_rt != g_rt_version) last = 0;   // a compile landed: maybe this one's newer shader
     if (last && key == last_key) {
         if (last == &g_fsh) g_fs_misses++; else g_fs_hits++;
+        if (last_old) g_fs_old++; else g_fs_new++;
         *ez = last_ez;
         if (last_ez) g_ez_draws++;
         return last;
     }
+    last_old = 0;
     *ez = 0;
     if (g_force_fs_general) { g_fs_misses++; last_key = key; last_ez = 0; return last = &g_fsh; }
+    // 0.8.6: a shader compiled from the current pica_fsh.glsl first (fs2_ in the cache); else the
+    // pack's or an older cached one (the same picture, decoding the light values a pixel), while
+    // the newer one is compiled in the background (nothing waits for it)
     const DkShader* sh;
-    int got_ez = want_ez;
-    if (!(sh = pack_find(key)) && !(sh = rt_find(key))) {
-        got_ez = 0;
-        if (want_ez && !(sh = pack_find(base))) sh = rt_find(base);
+    int got_ez = want_ez, old = 0;
+    if (!(sh = rt_find_v(key, 1))) {
+        old = 1;
+        if (!(sh = pack_find(key)) && !(sh = rt_find_v(key, 0))) {
+            got_ez = 0;
+            if (want_ez && (sh = rt_find_v(base, 1))) old = 0;
+            else if (want_ez && !(sh = pack_find(base))) sh = rt_find_v(base, 0);
+        }
     }
     if (sh) {
         g_fs_hits++;
         last_key = key; last_ez = got_ez; *ez = got_ez;
         if (got_ez) g_ez_draws++;
+        if (old) {
+            g_fs_old++;
+            last_old = 1;
+            seen_rt = g_rt_version;
+            if (compile_request(key, 0, want_ez)) g_fs_asked++;
+        } else g_fs_new++;
         return last = sh;
     }
     // missing: compile it here (the exact variant wanted); the general shader only if that failed
@@ -2196,7 +2253,7 @@ int msr_uam_compile_vert(const char* glsl, const char* out_path);
 #define RT_CODE_SIZE (16u << 20)
 #define RT_MAX 2048
 #define MAX_JOBS 64
-typedef struct { u64 key; DkShader sh; } RtShader;
+typedef struct { u64 key; int v2; DkShader sh; } RtShader;   // v2: a fragment shader from 0.8.6's pica_fsh.glsl (lt)
 static RtShader g_rt[RT_MAX];
 static u32 g_rt_n, g_rt_pos;
 static DkMemBlock g_rt_code;
@@ -2215,8 +2272,15 @@ static const DkShader* rt_find(u64 key) {
     for (u32 k = 0; k < g_rt_n; k++) if (g_rt[k].key == key) return &g_rt[k].sh;
     return 0;
 }
+// 1: only one compiled from the current pica_fsh.glsl; 0: only an older one (the cache before 0.8.6)
+static const DkShader* rt_find_v(u64 key, int v2) {
+    for (u32 k = 0; k < g_rt_n; k++) if (g_rt[k].key == key && g_rt[k].v2 == v2) return &g_rt[k].sh;
+    return 0;
+}
 
-static int rt_install(u64 key, const u8* dksh, u32 size) {
+static int rt_install_v(u64 key, const u8* dksh, u32 size, int v2);
+static int rt_install(u64 key, const u8* dksh, u32 size) { return rt_install_v(key, dksh, size, 0); }
+static int rt_install_v(u64 key, const u8* dksh, u32 size, int v2) {
     if (size < 64 || memcmp(dksh, "DKSH", 4) || g_rt_n >= RT_MAX) return 0;
     u32 pos = (g_rt_pos + DK_SHADER_CODE_ALIGNMENT - 1) & ~(DK_SHADER_CODE_ALIGNMENT - 1);
     if (pos + size + DK_SHADER_CODE_UNUSABLE_SIZE > RT_CODE_SIZE) return 0;
@@ -2225,6 +2289,7 @@ static int rt_install(u64 key, const u8* dksh, u32 size) {
     dkShaderMakerDefaults(&sm, g_rt_code, pos);
     dkShaderInitialize(&g_rt[g_rt_n].sh, &sm);
     g_rt[g_rt_n].key = key;
+    g_rt[g_rt_n].v2 = v2;
     g_rt_n++;
     g_rt_pos = pos + size;
     g_rt_version++;
@@ -2286,7 +2351,7 @@ static void compile_thread(void* arg) {
         mutexUnlock(&g_jmutex);
         u64 t0 = armGetSystemTick();
         char tmp[300], final[300];
-        const char* pre = j->vert ? "vs" : "fs";
+        const char* pre = j->vert ? "vs" : "fs2";   // fs2: from 0.8.6's pica_fsh.glsl (fs_: older ones, still loaded)
         snprintf(tmp, sizeof tmp, "%s/%s_%016llX.tmp", g_cache_dir, pre, (unsigned long long)j->key);
         snprintf(final, sizeof final, "%s/%s_%016llX.dksh", g_cache_dir, pre, (unsigned long long)j->key);
         int ok = j->vert ? msr_uam_compile_vert(j->glsl, tmp) : msr_uam_compile_frag(j->glsl, tmp);
@@ -2323,7 +2388,7 @@ static void fs_compile_poll(void) {
     for (int k = 0; k < MAX_JOBS; k++) {
         Job* j = &g_jobs[k];
         if (j->state == JOB_DONE) {
-            if (!rt_install(j->key, j->dksh, j->size)) {
+            if (!rt_install_v(j->key, j->dksh, j->size, !j->vert)) {
                 if (g_nfailed < 256) g_failed[g_nfailed++] = j->key;
                 msr_receipt("gpu: compiled %s shader %016llX did not fit", j->vert ? "vertex" : "fragment", (unsigned long long)j->key);
             } else {
@@ -2400,9 +2465,11 @@ void dkr_compiler_init(const char* cache_dir) {
         struct dirent* e;
         while ((e = readdir(d)) != 0) {
             const char* nm = e->d_name;
-            if ((strncmp(nm, "fs_", 3) && strncmp(nm, "vs_", 3)) || strlen(nm) != 3 + 16 + 5 || strcmp(nm + 19, ".dksh")) continue;
-            u64 key = strtoull(nm + 3, 0, 16);
-            if (pack_find(key) || rt_find(key)) continue;
+            int v2 = !strncmp(nm, "fs2_", 4), pl = v2 ? 4 : 3;
+            if (!v2 && strncmp(nm, "fs_", 3) && strncmp(nm, "vs_", 3)) continue;
+            if (strlen(nm) != (size_t)pl + 16 + 5 || strcmp(nm + pl + 16, ".dksh")) continue;
+            u64 key = strtoull(nm + pl, 0, 16);
+            if (v2 ? rt_find_v(key, 1) != 0 : (pack_find(key) || rt_find(key))) continue;
             char path[300];
             snprintf(path, sizeof path, "%s/%s", cache_dir, nm);
             FILE* f = fopen(path, "rb");
@@ -2411,7 +2478,7 @@ void dkr_compiler_init(const char* cache_dir) {
             long size = ftell(f);
             fseek(f, 0, SEEK_SET);
             u8* data = size > 0 && size < (1 << 20) ? (u8*)malloc(size) : 0;
-            if (data && fread(data, 1, size, f) == (size_t)size && rt_install(key, data, (u32)size)) g_cache_loaded++;
+            if (data && fread(data, 1, size, f) == (size_t)size && rt_install_v(key, data, (u32)size, v2)) g_cache_loaded++;
             free(data);
             fclose(f);
         }
@@ -2607,7 +2674,7 @@ void dkr_selftest(const u8* rec, size_t size, const char* png_path) {
         pos += 16 + h[3] * 8 + 4;
         const DkShader* packed = pack_find(key);
         if (!packed) continue;
-        struct { u32 regs[352]; float depth[4]; } fs;
+        FsUniforms fs;
         u32 seed = (u32)key | 1u;
         for (int k = 0; k < 352; k++) fs.regs[k] = st_rand(&seed);
         for (u32 k = 0; k < h[3]; k++) {
@@ -2616,6 +2683,7 @@ void dkr_selftest(const u8* rec, size_t size, const char* png_path) {
             if (rv[0] >= 0x80 && rv[0] < 0x80 + 352) fs.regs[rv[0] - 0x80] = rv[1];
         }
         fs.depth[0] = -1.f; fs.depth[1] = 0.f; fs.depth[2] = wbuf ? 1.f : 0.f; fs.depth[3] = 0.f;
+        fs_lights(&fs);
         dyn_reserve(64 * 1024);
         DkGpuAddr ubo = dkMemBlockGetGpuAddr(g_ubo);
         dkCmdBufPushConstants(g_cmd, ubo + VS_UBO_SIZE, FS_UBO_SIZE, 0, sizeof fs, &fs);
